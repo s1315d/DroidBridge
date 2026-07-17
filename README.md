@@ -1,8 +1,6 @@
-# DroidBridge
-⚡ Break the barrier between macOS and your devices. Warp-speed USB (ADB) transfers for power users + instant wireless local Wi-Fi sharing for any browser (iOS 🍎, Android 🤖, PC 💻). Nested folder navigation, folder diff comparisons, and custom folder staging. 0% cloud, 100% velocity. 🌁
-
-
 # DroidBridge 🌁
+
+⚡ Break the barrier between macOS and your devices. Warp-speed USB (ADB) transfers for power users + instant wireless local Wi-Fi sharing for any browser (iOS 🍎, Android 🤖, PC 💻). Nested folder navigation, folder diff comparisons, and custom folder staging. 0% cloud, 100% velocity. 🌁
 
 DroidBridge is a premium, high-performance desktop application for macOS built with Electron. It provides a visual, dual-pane interface to manage, browse, and transfer files and directories bidirectionally between your Mac and mobile devices. 
 
