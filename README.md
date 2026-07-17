@@ -134,17 +134,22 @@ This mode allows you to transfer files bidirectionally between your Mac and **an
 
 ---
 
-###  Note for macOS Users If You Download App From Release Section
+##  Note for macOS Users If You Download App From Release Section
 
 If you get a warning saying the app "is damaged and can't be opened", this is a standard macOS warning for unsigned apps. To open it:
 
 Open your Terminal app.
 Run the following command:
-bash
 
-xattr -cr /path/to/DroidBridge.app
+   ```bash
+   xattr -cr /path/to/DroidBridge.app
+
+   ```
 
 (Tip: Type xattr -cr and drag DroidBridge.app into the terminal to auto-fill the path!)
+
+---
+
 ## 📄 License
 
 This project is licensed under the MIT License. Developed by Shubham Gour.
