@@ -1732,11 +1732,7 @@ async function init() {
     const adbStatus = await window.droidBridge.checkAdb();
     state.adbInstalled = adbStatus && adbStatus.installed;
 
-    if (!state.adbInstalled) {
-      showScreen('no-adb-screen');
-      return;
-    }
-
+    // Do not block application load if ADB is missing, allowing Wi-Fi Share Mode usage.
     hideScreen('no-adb-screen');
 
     // 2. Get home directory and set as initial local path
