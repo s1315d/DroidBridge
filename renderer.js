@@ -1076,23 +1076,10 @@ async function refreshDevicesList() {
       }
     }
 
-    // Compare with current state.devices to detect changes or show toasts
-    const prevIds = state.devices.map(d => d.id);
-    const currIds = updatedDevices.map(d => d.id);
-
-    // Connected toasts
-    for (const d of updatedDevices) {
-      if (!prevIds.includes(d.id)) {
-        showToast(`${d.model} connected`, 'success');
-      }
-    }
-
-    // Disconnected toasts
-    for (const d of state.devices) {
-      if (!currIds.includes(d.id)) {
-        showToast(`${d.model} disconnected`, 'info');
-      }
-    }
+    // Check if connected devices list actually changed
+    const prevDeviceKey = state.devices.map(d => `${d.id}:${d.status}`).join('|');
+    const currDeviceKey = updatedDevices.map(d => `${d.id}:${d.status}`).join('|');
+    const devicesChanged = prevDeviceKey !== currDeviceKey;
 
     state.devices = updatedDevices;
 
@@ -1128,25 +1115,24 @@ async function refreshDevicesList() {
       if (dot) dot.className = 'status-dot connected';
     }
 
-    // Update the dropdown menus
-    updateSourceDropdowns();
+    // Only update dropdowns and reload file panels IF devices list actually changed or on initial load
+    if (devicesChanged || !state.localPath) {
+      updateSourceDropdowns();
+      updateDeviceBar();
+      loadStorageInfo();
 
-    // Refresh display
-    updateDeviceBar();
-    loadStorageInfo();
+      if (!state.localPath) {
+        const homeDir = await window.droidBridge.getHomeDir();
+        await loadLocalFiles(homeDir || '/');
+      }
 
-    // Reload files for panels if their source changed or if we need to load them first time
-    if (!state.localPath) {
-      const homeDir = await window.droidBridge.getHomeDir();
-      await loadLocalFiles(homeDir || '/');
-    } else {
-      await loadLocalFiles(state.localPath);
+      if (!state.remotePath) {
+        state.remotePath = '/sdcard';
+      }
+      if (devicesChanged && state.connectedDevice) {
+        await loadRemoteFiles(state.remotePath);
+      }
     }
-
-    if (!state.remotePath) {
-      state.remotePath = '/sdcard';
-    }
-    await loadRemoteFiles(state.remotePath);
 
   } catch (err) {
     console.error('Error refreshing devices list:', err);
