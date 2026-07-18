@@ -56,7 +56,13 @@ DroidBridge supports **two powerful modes of operation** to accommodate all user
 3. **Homebrew** (optional, to install ADB).
 
 ### Step 1: Install ADB (For USB Mode Only)
-If you wish to use USB mode, you need ADB installed on your Mac:
+If you wish to use USB mode, you can use our **automated setup script** (which auto-detects and installs Homebrew & ADB for you):
+```bash
+chmod +x setup-adb.sh && ./setup-adb.sh
+```
+*(Tip: If you get a "permission denied" error when running `./setup-adb.sh`, the `chmod +x setup-adb.sh` command grants it execution permissions).*
+
+Or install manually via Homebrew:
 ```bash
 brew install android-platform-tools
 ```
