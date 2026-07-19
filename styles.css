@@ -659,9 +659,7 @@ body {
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(10, 10, 15, 0.85);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(10, 10, 15, 0.92);
   display: none;
   align-items: center;
   justify-content: center;
@@ -843,15 +841,13 @@ body {
 
 .context-menu {
   position: fixed;
-  background: var(--surface-elevated);
+  background: #1a1a26;
   border: 1px solid var(--border-hover);
   border-radius: 8px;
   padding: 4px;
   min-width: 180px;
   z-index: 200;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
 
 .context-menu-item {
@@ -1073,9 +1069,7 @@ body {
 
 .about-modal {
   width: 380px;
-  background: rgba(18, 18, 26, 0.85);
-  backdrop-filter: blur(30px) saturate(180%);
-  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  background: #161622;
   border-radius: 20px;
   padding: 30px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1287,7 +1281,6 @@ body {
   border-radius: 16px;
   padding: 32px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(20px);
   box-sizing: border-box;
 }
 
@@ -1297,7 +1290,7 @@ body {
 
 @keyframes wifiPulse {
   0% { transform: scale(1); opacity: 0.8; }
-  50% { transform: scale(1.1); opacity: 1; filter: drop-shadow(0 0 10px var(--primary)); }
+  50% { transform: scale(1.06); opacity: 1; }
   100% { transform: scale(1); opacity: 0.8; }
 }
 
