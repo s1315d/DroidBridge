@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com;">
+  <title>DroidBridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Custom Title Bar -->
+  <div id="titlebar">
+    <span class="titlebar-title">DroidBridge</span>
+    <div class="titlebar-spacer"></div>
+    <div id="connection-badge" class="disconnected">
+      <span id="connection-dot" class="status-dot disconnected"></span>
+      <span id="connection-text">No Device</span>
+    </div>
+    <button id="btn-about" class="titlebar-about-btn" title="About DroidBridge" style="-webkit-app-region: no-drag;">ℹ️</button>
+  </div>
+
+  <!-- App Container -->
+  <div id="app-container">
+
+    <!-- Device Info Bar -->
+    <div id="device-bar" style="display: none;">
+      <div class="device-icon">📱</div>
+      <div class="device-details">
+        <span id="device-model" class="device-model">—</span>
+        <span id="device-meta" class="device-meta">—</span>
+      </div>
+      <div class="storage-bar-container">
+        <div class="storage-bar">
+          <div id="storage-bar-fill" class="storage-bar-fill" style="width: 0%"></div>
+        </div>
+        <span id="storage-text" class="storage-text">—</span>
+      </div>
+    </div>
+
+    <!-- File Manager -->
+    <div id="file-manager">
+
+      <!-- Local Panel (Mac) -->
+      <div class="file-panel" id="local-panel">
+        <div class="panel-header">
+          <div class="panel-label-row">
+            <select id="left-source-select" class="panel-source-select">
+              <option value="mac">💻 macOS Filesystem</option>
+            </select>
+            <div class="panel-actions">
+              <button id="btn-compare-local" class="compare-btn" title="Compare folders by name and size">⚖️ Compare</button>
+              <button id="btn-refresh-local" class="refresh-btn" title="Refresh local directory">🔄</button>
+            </div>
+          </div>
+          <div id="local-breadcrumb" class="breadcrumb"></div>
+          <div class="search-bar">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="local-search" class="search-input" placeholder="Search files...">
+          </div>
+        </div>
+        <div class="file-list-header">
+          <span></span>
+          <span class="sortable" data-sort="name" data-panel="local">Name</span>
+          <span class="sortable" data-sort="kind" data-panel="local">Kind</span>
+          <span class="sortable" data-sort="size" data-panel="local">Size</span>
+          <span class="sortable" data-sort="date" data-panel="local">Modified</span>
+        </div>
+        <div id="local-file-list" class="file-list"></div>
+      </div>
+
+      <!-- Transfer Action Bar -->
+      <div id="transfer-bar">
+        <button id="btn-to-phone" class="transfer-btn" disabled title="Copy selected files to Android">
+          →
+        </button>
+        <span class="transfer-btn-label" id="label-to-phone">To Phone</span>
+        <div style="flex:1"></div>
+        <button id="btn-to-mac" class="transfer-btn" disabled title="Copy selected files to Mac">
+          ←
+        </button>
+        <span class="transfer-btn-label" id="label-to-mac">To Mac</span>
+      </div>
+
+      <!-- Remote Panel (Android) -->
+      <div class="file-panel" id="remote-panel">
+        <div class="panel-header">
+          <div class="panel-label-row">
+            <select id="right-source-select" class="panel-source-select">
+              <option value="mac">💻 macOS Filesystem</option>
+            </select>
+            <div class="panel-actions">
+              <button id="btn-compare-remote" class="compare-btn" title="Compare folders by name and size">⚖️ Compare</button>
+              <button id="btn-refresh-remote" class="refresh-btn" title="Refresh remote directory">🔄</button>
+            </div>
+          </div>
+          <div id="remote-breadcrumb" class="breadcrumb"></div>
+          <div class="search-bar">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="remote-search" class="search-input" placeholder="Search files...">
+          </div>
+        </div>
+        <div class="file-list-header">
+          <span></span>
+          <span class="sortable" data-sort="name" data-panel="remote">Name</span>
+          <span class="sortable" data-sort="kind" data-panel="remote">Kind</span>
+          <span class="sortable" data-sort="size" data-panel="remote">Size</span>
+          <span class="sortable" data-sort="date" data-panel="remote">Modified</span>
+        </div>
+        <div id="remote-file-list" class="file-list"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Overlay: No ADB Installed -->
+  <div id="no-adb-screen" class="overlay">
+    <div class="overlay-content">
+      <div class="overlay-icon">⚠️</div>
+      <h2 class="overlay-title">ADB Not Found</h2>
+      <p class="overlay-text">
+        DroidBridge requires Android Debug Bridge (ADB) to communicate with your phone.
+      </p>
+      <div class="setup-steps">
+        <div class="setup-step">
+          <span class="step-number">1</span>
+          <span class="step-text">Install Homebrew if not already installed:<br><code>  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"</code></span>
+        </div>
+        <div class="setup-step">
+          <span class="step-number">2</span>
+          <span class="step-text">Install ADB via Homebrew:<br><code>  brew install android-platform-tools</code></span>
+        </div>
+        <div class="setup-step">
+          <span class="step-number">3</span>
+          <span class="step-text">Restart DroidBridge</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Overlay: No Device Connected -->
+  <div id="no-device-screen" class="overlay">
+    <div class="overlay-content">
+      <div class="overlay-icon float-anim">📱</div>
+      <h2 class="overlay-title">Connect Your Android Device</h2>
+      <p class="overlay-text">
+        Plug in your Android phone via USB cable to get started.
+      </p>
+      <div class="setup-steps">
+        <div class="setup-step">
+          <span class="step-number">1</span>
+          <span class="step-text">On your phone, go to <strong>Settings → About Phone</strong></span>
+        </div>
+        <div class="setup-step">
+          <span class="step-number">2</span>
+          <span class="step-text">Tap <strong>Build Number</strong> 7 times to enable Developer Options</span>
+        </div>
+        <div class="setup-step">
+          <span class="step-number">3</span>
+          <span class="step-text">Go to <strong>Developer Options → Enable USB Debugging</strong></span>
+        </div>
+        <div class="setup-step">
+          <span class="step-number">4</span>
+          <span class="step-text">Connect your phone via USB and tap <strong>"Allow"</strong> on the prompt</span>
+        </div>
+      </div>
+      <div class="setup-divider"><span>OR</span></div>
+      <button id="btn-start-wifi-setup" class="wifi-setup-btn">📶 Start Wi-Fi Transfer Mode</button>
+      <p class="wifi-btn-compat-note">📱 Supports any browser (iPhone 🍎, iPad 🍏, Android 🤖, Mac 💻, Laptop, etc.)</p>
+    </div>
+  </div>
+
+  <!-- Overlay: Wi-Fi Transfer Mode -->
+  <div id="wifi-transfer-screen" class="overlay">
+    <div class="overlay-content wifi-modal">
+      <div class="overlay-icon wifi-pulse">📶</div>
+      <h2 class="overlay-title">Wi-Fi Transfer Mode Active</h2>
+      <p class="overlay-text">
+        Scan the QR code or visit the link on your phone to transfer files.<br>
+        <span class="wifi-compat-note">📱 Supports any browser (iPhone 🍎, iPad 🍏, Android 🤖, Mac 💻, Laptop, etc.)</span>
+      </p>
+
+      <div class="wifi-setup-details">
+        <div class="qr-container">
+          <img id="wifi-qr-code" src="" alt="QR Code Link">
+          <span class="qr-label">Scan to connect phone</span>
+        </div>
+
+        <div class="wifi-instructions">
+          <div class="wifi-url-box">
+            <span class="url-label">Visit this link on your phone:</span>
+            <div class="wifi-url-row">
+              <input type="text" id="wifi-url-text" class="wifi-url-input" readonly value="http://192.168.1.XX:8080">
+              <button id="btn-copy-wifi-url" class="copy-url-btn" title="Copy URL">📋</button>
+            </div>
+          </div>
+          
+          <div class="wifi-folder-box">
+            <span class="folder-label">Staging Folder on Mac:</span>
+            <div class="wifi-folder-row">
+              <span id="wifi-shared-path" class="wifi-shared-path">/Users/shubhamgour/Desktop/...</span>
+              <div class="wifi-folder-buttons">
+                <button id="btn-choose-wifi-dir" class="choose-dir-btn" title="Choose Folder">✏️ Choose</button>
+                <button id="btn-open-wifi-dir" class="open-dir-btn" title="Open in Finder">📂 Open</button>
+              </div>
+            </div>
+            <p class="wifi-default-note">Default Path: ~/Downloads/DroidBridge-WiFi-Share</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="wifi-activity">
+        <h3 class="activity-title">Live Activity Log</h3>
+        <div id="wifi-activity-log" class="activity-log">
+          <div class="activity-empty">No files transferred yet. Connect your phone to start uploading/downloading!</div>
+        </div>
+      </div>
+
+      <button id="btn-stop-wifi" class="stop-wifi-btn">🛑 Stop Wi-Fi Server</button>
+    </div>
+  </div>
+
+  <!-- Overlay: Transfer Progress -->
+  <div id="transfer-overlay" class="overlay">
+    <div class="overlay-content transfer-modal">
+      <div class="overlay-icon">📤</div>
+      <h2 class="overlay-title">Transferring Files</h2>
+      <div class="progress-bar-container">
+        <div class="progress-bar-fill" id="progress-bar-fill" style="width: 0%"></div>
+      </div>
+      <span id="progress-percent" class="progress-text">0%</span>
+      <p id="progress-filename" class="progress-filename">Preparing...</p>
+    </div>
+  </div>
+
+  <!-- Overlay: Mac App File Preview -->
+  <div id="mac-preview-modal" class="overlay">
+    <div class="overlay-content mac-preview-card">
+      <button class="close-about-btn" id="btn-close-mac-preview">✕</button>
+      <h3 id="mac-preview-title" class="mac-preview-title">File Preview</h3>
+      <div id="mac-preview-body" class="mac-preview-body"></div>
+    </div>
+  </div>
+
+  <!-- Context Menu -->
+  <div id="context-menu" class="context-menu" style="display: none;"></div>
+
+  <!-- Overlay: About DroidBridge -->
+  <div id="about-overlay" class="overlay">
+    <div class="overlay-content about-modal">
+      <button class="close-about-btn" id="btn-close-about">✕</button>
+      <img src="icon.png" class="about-icon" alt="DroidBridge Icon">
+      <h2 class="about-title">DroidBridge</h2>
+      <p class="about-version">Version 1.0.0</p>
+      
+      <div class="about-divider"></div>
+      
+      <div class="about-credits">
+        <p class="credits-designed">Designed & Developed by</p>
+        <p class="credits-author">Shubham Gour</p>
+        
+        <div class="about-ai-container">
+          <span class="ai-badge">🤖 AI Collaboration</span>
+          <p class="credits-ai-title">Advanced Agentic Coding:</p>
+          <ul class="credits-ai-list">
+            <li><strong>Antigravity</strong> (Google DeepMind Team)</li>
+            <li><strong>Claude 4.6 (Opus)</strong></li>
+            <li><strong>Gemini 3.5 (Flash)</strong></li>
+          </ul>
+        </div>
+      </div>
+      
+      <div class="about-security-container">
+        <span class="security-badge">🔒 Security & Privacy</span>
+        <p class="security-note-text">
+          • DroidBridge operates <strong>100% locally</strong> (no internet data is transmitted).<br>
+          • The RSA fingerprint prompt ensures only your manually authorized Mac can access the phone.
+        </p>
+      </div>
+      
+      <div class="about-footer">
+        <p>© 2026 DroidBridge. MIT License.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container"></div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

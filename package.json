@@ -1,0 +1,26 @@
+{
+  "name": "droidbridge",
+  "version": "1.0.2",
+  "description": "Premium Mac ↔ Android file transfer app",
+  "main": "main.js",
+  "scripts": {
+    "start": "node -e \"if (!require('fs').existsSync('node_modules')) { console.log('node_modules not found, auto-installing dependencies...'); require('child_process').execSync('npm install', {stdio: 'inherit'}); }\" && npx electron .",
+    "dev": "electron . --dev",
+    "package": "node -e \"if (!require('fs').existsSync('node_modules/electron-packager')) { console.log('electron-packager not found, installing dependencies...'); require('child_process').execSync('npm install', {stdio: 'inherit'}); }\" && node build-mac-icon.js && electron-packager . DroidBridge --platform=darwin --overwrite --icon=icon.icns"
+  },
+  "keywords": [
+    "android",
+    "file-transfer",
+    "adb",
+    "electron"
+  ],
+  "author": "DroidBridge",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-packager": "^17.1.2"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}
