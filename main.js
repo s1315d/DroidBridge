@@ -164,6 +164,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      webSecurity: false,
       preload: path.join(__dirname, 'preload.js'),
     },
     show: false,
@@ -1011,11 +1012,39 @@ const mobileHtml = `<!DOCTYPE html>
     .file-item:active {
       background: rgba(255, 255, 255, 0.04);
     }
+    .file-left-group {
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+      margin-right: 12px;
+    }
+    .file-thumb {
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.05);
+      flex-shrink: 0;
+      margin-right: 12px;
+    }
+    .file-icon-badge {
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      flex-shrink: 0;
+      margin-right: 12px;
+    }
     .file-details {
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      margin-right: 12px;
     }
     .file-name {
       font-size: 13px;
@@ -1028,6 +1057,30 @@ const mobileHtml = `<!DOCTYPE html>
       font-size: 11px;
       color: var(--text-muted);
       margin-top: 2px;
+    }
+    .action-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .preview-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .preview-btn:active {
+      background: rgba(255, 255, 255, 0.15);
     }
     .download-btn, .open-btn {
       background: rgba(108, 92, 231, 0.1);
@@ -1043,6 +1096,7 @@ const mobileHtml = `<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: center;
+      flex-shrink: 0;
     }
     .download-btn:active, .open-btn:active {
       background: var(--primary);
@@ -1060,6 +1114,82 @@ const mobileHtml = `<!DOCTYPE html>
       margin-top: auto;
       padding-top: 20px;
       text-align: center;
+    }
+
+    /* Modal Preview Overlay */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 10, 15, 0.9);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      padding: 16px;
+    }
+    .modal-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .modal-content {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 600px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+    }
+    .modal-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    #modal-filename {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 80%;
+    }
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 22px;
+      cursor: pointer;
+      padding: 0 4px;
+      line-height: 1;
+    }
+    .modal-close:hover {
+      color: var(--text);
+    }
+    .modal-body {
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: auto;
+      min-height: 200px;
+      background: #000;
+    }
+    .modal-body img, .modal-body video {
+      max-width: 100%;
+      max-height: 65vh;
+      object-fit: contain;
+      border-radius: 8px;
     }
   </style>
 </head>
@@ -1106,6 +1236,17 @@ const mobileHtml = `<!DOCTYPE html>
     Powered by DroidBridge • Both devices must be on the same Wi-Fi
   </div>
 
+  <!-- Modal Preview Overlay -->
+  <div id="preview-modal" class="modal-overlay" onclick="closePreviewModal(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span id="modal-filename">File Preview</span>
+        <button class="modal-close" onclick="closePreviewModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
   <script>
     const fileInput = document.getElementById('file-input');
     const progressBox = document.getElementById('progress-box');
@@ -1118,14 +1259,123 @@ const mobileHtml = `<!DOCTYPE html>
 
     let currentPath = '';
 
+    function openPreview(fileName, relativePath) {
+      const modal = document.getElementById('preview-modal');
+      const title = document.getElementById('modal-filename');
+      const body = document.getElementById('modal-body');
+      
+      title.textContent = fileName;
+      body.innerHTML = '';
+      
+      const fileUrl = '/download?file=' + encodeURIComponent(relativePath);
+      const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
+      const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
+      const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+
+      if (imageExts.includes(ext)) {
+        const img = document.createElement('img');
+        img.src = fileUrl;
+        body.appendChild(img);
+      } else if (videoExts.includes(ext)) {
+        const video = document.createElement('video');
+        video.src = fileUrl;
+        video.controls = true;
+        video.autoplay = true;
+        video.playsInline = true;
+        body.appendChild(video);
+      } else {
+        window.open(fileUrl, '_blank');
+        return;
+      }
+      
+      modal.classList.add('active');
+    }
+
+    function closePreviewModal(e) {
+      if (e && e.stopPropagation) e.stopPropagation();
+      const modal = document.getElementById('preview-modal');
+      const body = document.getElementById('modal-body');
+      if (body) {
+        const mediaElements = body.querySelectorAll('video, audio');
+        mediaElements.forEach(m => {
+          try {
+            m.pause();
+            m.src = '';
+            m.load();
+          } catch(err) {}
+        });
+        body.innerHTML = '';
+      }
+      if (modal) modal.classList.remove('active');
+    }
+
+    function getFilePreviewElement(fileName, relativePath, isDirectory) {
+      if (isDirectory) {
+        const div = document.createElement('div');
+        div.className = 'file-icon-badge';
+        div.textContent = '📁';
+        return div;
+      }
+      
+      const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
+      const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
+      const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+      const fileUrl = '/download?file=' + encodeURIComponent(relativePath);
+      
+      if (imageExts.includes(ext)) {
+        const img = document.createElement('img');
+        img.className = 'file-thumb';
+        img.loading = 'lazy';
+        img.alt = 'preview';
+        img.src = fileUrl;
+        img.onerror = function() {
+          const badge = document.createElement('div');
+          badge.className = 'file-icon-badge';
+          badge.textContent = '🖼️';
+          img.replaceWith(badge);
+        };
+        return img;
+      }
+
+      if (videoExts.includes(ext)) {
+        const video = document.createElement('video');
+        video.className = 'file-thumb';
+        video.preload = 'metadata';
+        video.muted = true;
+        video.playsInline = true;
+        video.src = fileUrl + '#t=0.5';
+        video.onerror = function() {
+          const badge = document.createElement('div');
+          badge.className = 'file-icon-badge';
+          badge.textContent = '🎬';
+          video.replaceWith(badge);
+        };
+        return video;
+      }
+
+      const iconMap = {
+        mp3: '🎵', wav: '🎵', flac: '🎵', m4a: '🎵', ogg: '🎵',
+        pdf: '📕', doc: '📘', docx: '📘', txt: '📝', json: '💻',
+        zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
+        apk: '📲', dmg: '💿'
+      };
+      
+      const badge = document.createElement('div');
+      badge.className = 'file-icon-badge';
+      badge.textContent = iconMap[ext] || '📄';
+      return badge;
+    }
+
     // Load files list
     async function loadFiles() {
       try {
         const res = await fetch('/files?path=' + encodeURIComponent(currentPath));
-        const files = await res.json();
+        const data = await res.json();
+        const files = Array.isArray(data) ? data : (data.files || []);
+        const rootFolderName = (data && data.folderName) ? data.folderName : 'Shared';
         
         // Update breadcrumb UI
-        pathDisplay.textContent = '/' + currentPath;
+        pathDisplay.textContent = currentPath ? '📁 ' + rootFolderName + ' / ' + currentPath : '📁 ' + rootFolderName;
         btnBack.style.display = currentPath ? 'block' : 'none';
 
         filesContainer.innerHTML = '';
@@ -1139,24 +1389,53 @@ const mobileHtml = `<!DOCTYPE html>
           item.className = 'file-item';
           
           const relativeFilePath = currentPath ? currentPath + '/' + f.name : f.name;
+          const previewEl = getFilePreviewElement(f.name, relativeFilePath, f.isDirectory);
+
+          const leftGroup = document.createElement('div');
+          leftGroup.className = 'file-left-group';
+          leftGroup.appendChild(previewEl);
+
+          const details = document.createElement('div');
+          details.className = 'file-details';
+          
+          const nameSpan = document.createElement('span');
+          nameSpan.className = 'file-name';
+          nameSpan.textContent = f.name;
+
+          const sizeSpan = document.createElement('span');
+          sizeSpan.className = 'file-size';
+          sizeSpan.textContent = f.isDirectory ? 'Folder' : formatBytes(f.size);
+
+          details.appendChild(nameSpan);
+          details.appendChild(sizeSpan);
+          leftGroup.appendChild(details);
+
+          item.appendChild(leftGroup);
+
+          const actionGroup = document.createElement('div');
+          actionGroup.className = 'action-group';
 
           if (f.isDirectory) {
-            item.innerHTML = \`
-              <div class="file-details">
-                <span class="file-name">📁 \${f.name}</span>
-                <span class="file-size">Folder</span>
-              </div>
-              <button class="open-btn" onclick="navigateInto('\${f.name}')">Open ➔</button>
-            \`;
+            const openBtn = document.createElement('button');
+            openBtn.className = 'open-btn';
+            openBtn.textContent = 'Open ➔';
+            openBtn.onclick = () => navigateInto(f.name);
+            actionGroup.appendChild(openBtn);
           } else {
-            item.innerHTML = \`
-              <div class="file-details">
-                <span class="file-name">📄 \${f.name}</span>
-                <span class="file-size">\${formatBytes(f.size)}</span>
-              </div>
-              <a href="/download?file=\${encodeURIComponent(relativeFilePath)}" class="download-btn">⬇️ Download</a>
-            \`;
+            const previewBtn = document.createElement('button');
+            previewBtn.className = 'preview-btn';
+            previewBtn.textContent = '👁️ Preview';
+            previewBtn.onclick = () => openPreview(f.name, relativeFilePath);
+            actionGroup.appendChild(previewBtn);
+
+            const dlBtn = document.createElement('a');
+            dlBtn.className = 'download-btn';
+            dlBtn.href = '/download?file=' + encodeURIComponent(relativeFilePath);
+            dlBtn.textContent = '⬇️ Download';
+            actionGroup.appendChild(dlBtn);
           }
+
+          item.appendChild(actionGroup);
           filesContainer.appendChild(item);
         });
       } catch (err) {
@@ -1310,7 +1589,7 @@ async function startWifiServer() {
           }
           if (!fs.existsSync(targetPath)) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify([]));
+            res.end(JSON.stringify({ folderName: path.basename(wifiSharedDir) || 'Shared', files: [] }));
             return;
           }
           const files = fs.readdirSync(targetPath).map(name => {
@@ -1319,7 +1598,7 @@ async function startWifiServer() {
             return { name, size: stat.isDirectory() ? 0 : stat.size, isDirectory: stat.isDirectory() };
           }).filter(f => !f.name.startsWith('.'));
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(files));
+          res.end(JSON.stringify({ folderName: path.basename(wifiSharedDir) || 'Shared', files }));
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'text/plain' });
           res.end(err.message);
@@ -1327,7 +1606,7 @@ async function startWifiServer() {
         return;
       }
 
-      // Handle File Downloads
+      // Handle File Downloads & Streaming Previews
       if (reqUrl.pathname === '/download' && req.method === 'GET') {
         const fileName = reqUrl.searchParams.get('file');
         if (!fileName) {
@@ -1352,11 +1631,51 @@ async function startWifiServer() {
           res.end('Cannot download a directory');
           return;
         }
-        res.writeHead(200, {
-          'Content-Type': 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${encodeURIComponent(path.basename(filePath))}"`,
-          'Content-Length': stat.size
-        });
+
+        const ext = path.extname(filePath).toLowerCase().replace('.', '');
+        const mimeTypes = {
+          jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+          mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', avi: 'video/x-msvideo', m4v: 'video/x-m4v', '3gp': 'video/3gpp',
+          mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', m4a: 'audio/mp4', ogg: 'audio/ogg',
+          pdf: 'application/pdf', txt: 'text/plain; charset=utf-8', html: 'text/html', json: 'application/json'
+        };
+
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
+        const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+        const audioExts = ['mp3', 'wav', 'flac', 'm4a', 'ogg'];
+        const isInline = reqUrl.searchParams.get('inline') === '1' || imageExts.includes(ext) || videoExts.includes(ext) || audioExts.includes(ext);
+
+        const range = req.headers.range;
+        if (range && videoExts.includes(ext)) {
+          const parts = range.replace(/bytes=/, "").split("-");
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+          const chunksize = (end - start) + 1;
+          const file = fs.createReadStream(filePath, { start, end });
+          res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': chunksize,
+            'Content-Type': contentType,
+            'Access-Control-Allow-Origin': '*'
+          });
+          file.pipe(res);
+          return;
+        }
+
+        const headers = {
+          'Content-Type': contentType,
+          'Content-Length': stat.size,
+          'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*'
+        };
+
+        if (!isInline || reqUrl.searchParams.get('dl') === '1') {
+          headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(path.basename(filePath))}"`;
+        }
+
+        res.writeHead(200, headers);
         fs.createReadStream(filePath).pipe(res);
         return;
       }
@@ -1489,6 +1808,94 @@ ipcMain.handle('open-wifi-shared-dir', () => {
   if (fs.existsSync(wifiSharedDir)) {
     shell.openPath(wifiSharedDir);
   }
+});
+
+ipcMain.handle('open-file-path', (_event, filePath) => {
+  if (filePath && fs.existsSync(filePath)) {
+    shell.openPath(filePath);
+    return true;
+  }
+  return false;
+});
+
+ipcMain.handle('get-file-thumbnail', async (_event, fileName) => {
+  if (!fileName || !wifiSharedDir) return null;
+  try {
+    const filePath = path.join(wifiSharedDir, fileName);
+    if (!fs.existsSync(filePath)) return null;
+    
+    const stat = fs.statSync(filePath);
+    if (!stat || stat.size === 0) return null;
+
+    const ext = path.extname(filePath).toLowerCase().replace('.', '');
+    const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+
+    if (videoExts.includes(ext)) {
+      const tmpDir = os.tmpdir();
+      const tmpThumb = path.join(tmpDir, `${fileName}.png`);
+
+      // 1. Try macOS built-in qlmanage for video frame thumbnail
+      try {
+        await new Promise((resolve) => {
+          execFile('qlmanage', ['-t', '-s', '256', '-o', tmpDir, filePath], { timeout: 3000 }, resolve);
+        });
+
+        if (fs.existsSync(tmpThumb)) {
+          const imgData = fs.readFileSync(tmpThumb);
+          try { fs.unlinkSync(tmpThumb); } catch(e) {}
+          return `data:image/png;base64,${imgData.toString('base64')}`;
+        }
+      } catch (err) {}
+
+      // 2. Try ffmpeg fallback
+      try {
+        const ffmpegPath = fs.existsSync('/opt/homebrew/bin/ffmpeg') ? '/opt/homebrew/bin/ffmpeg' : (fs.existsSync('/usr/local/bin/ffmpeg') ? '/usr/local/bin/ffmpeg' : 'ffmpeg');
+        await new Promise((resolve) => {
+          execFile(ffmpegPath, ['-ss', '00:00:00.5', '-i', filePath, '-vframes', '1', '-s', '256x256', tmpThumb, '-y'], { timeout: 3000 }, resolve);
+        });
+
+        if (fs.existsSync(tmpThumb)) {
+          const imgData = fs.readFileSync(tmpThumb);
+          try { fs.unlinkSync(tmpThumb); } catch(e) {}
+          return `data:image/png;base64,${imgData.toString('base64')}`;
+        }
+      } catch (err) {}
+    }
+
+    if (nativeImage && nativeImage.createThumbnailFromPath) {
+      const image = await nativeImage.createThumbnailFromPath(filePath, { width: 128, height: 128 });
+      if (image && !image.isEmpty()) {
+        return image.toDataURL();
+      }
+    }
+  } catch (err) {
+    console.error('[WiFi] Safe thumbnail error:', err.message || err);
+  }
+  return null;
+});
+
+ipcMain.handle('get-file-data-url', async (_event, fileName) => {
+  if (!fileName || !wifiSharedDir) return null;
+  try {
+    const filePath = path.join(wifiSharedDir, fileName);
+    if (!fs.existsSync(filePath)) return null;
+
+    const ext = path.extname(filePath).toLowerCase().replace('.', '');
+    const mimeTypes = {
+      jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml'
+    };
+
+    const mime = mimeTypes[ext];
+    if (mime && nativeImage) {
+      const image = nativeImage.createFromPath(filePath);
+      if (image && !image.isEmpty()) {
+        return image.toDataURL();
+      }
+    }
+  } catch (err) {
+    console.error('[WiFi] Data URL error:', err.message || err);
+  }
+  return null;
 });
 
 // ─── Custom Application Menu ─────────────────────────────────────────────────

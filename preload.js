@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('droidBridge', {
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
   selectFiles: () => ipcRenderer.invoke('select-files'),
   openInFinder: (filePath) => ipcRenderer.invoke('open-in-finder', filePath),
+  openFilePath: (filePath) => ipcRenderer.invoke('open-file-path', filePath),
   getTempDir: () => ipcRenderer.invoke('get-temp-dir'),
   cleanupDir: (dirPath) => ipcRenderer.invoke('cleanup-dir', dirPath),
 
@@ -45,6 +46,8 @@ contextBridge.exposeInMainWorld('droidBridge', {
   stopWifiServer: () => ipcRenderer.invoke('stop-wifi-server'),
   getWifiStatus: () => ipcRenderer.invoke('get-wifi-status'),
   openWifiSharedDir: () => ipcRenderer.invoke('open-wifi-shared-dir'),
+  getFileThumbnail: (fileName) => ipcRenderer.invoke('get-file-thumbnail', fileName),
+  getFileDataUrl: (fileName) => ipcRenderer.invoke('get-file-data-url', fileName),
   onWifiUploadProgress: (callback) => {
     ipcRenderer.on('wifi-upload-progress', (_event, data) => callback(data));
   },

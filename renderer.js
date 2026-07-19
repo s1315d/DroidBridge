@@ -1519,6 +1519,8 @@ function setupGlobalHandlers() {
             sharedPath.textContent = result.sharedDir;
             sharedPath.title = result.sharedDir;
           }
+          state.wifiSharedDir = result.sharedDir;
+          state.wifiPort = result.port;
           showScreen('wifi-transfer-screen');
 
           // Reset activity log
@@ -1550,6 +1552,7 @@ function setupGlobalHandlers() {
               sharedPath.textContent = res.sharedDir;
               sharedPath.title = res.sharedDir;
             }
+            state.wifiSharedDir = res.sharedDir;
             showToast('Shared folder updated successfully', 'success');
           }
         }
@@ -1578,6 +1581,17 @@ function setupGlobalHandlers() {
         navigator.clipboard.writeText(urlInput.value);
         showToast('Link copied to clipboard!', 'success');
       }
+    });
+  }
+
+  const btnCloseMacPreview = document.getElementById('btn-close-mac-preview');
+  if (btnCloseMacPreview) {
+    btnCloseMacPreview.addEventListener('click', closeMacPreview);
+  }
+  const macModal = document.getElementById('mac-preview-modal');
+  if (macModal) {
+    macModal.addEventListener('click', (e) => {
+      if (e.target === macModal) closeMacPreview();
     });
   }
 
@@ -1763,15 +1777,13 @@ async function init() {
   }
 }
 
-function updateWifiActivityLog(progress) {
+async function updateWifiActivityLog(progress) {
   const logContainer = document.getElementById('wifi-activity-log');
   if (!logContainer) return;
 
-  // Remove empty state
   const empty = logContainer.querySelector('.activity-empty');
   if (empty) empty.remove();
 
-  // Clean filename for ID matching
   const safeId = 'wifi-file-' + progress.fileName.replace(/[^a-zA-Z0-9]/g, '-');
   let item = document.getElementById(safeId);
 
@@ -1782,21 +1794,207 @@ function updateWifiActivityLog(progress) {
     logContainer.appendChild(item);
   }
 
-  const statusText = progress.completed 
-    ? '<span class="status">✓ Completed</span>' 
-    : `<span class="percent">${progress.percent}%</span>`;
+  // Prevent out-of-order progress events from overwriting completed status!
+  if (item.dataset.completed === 'true' && !progress.completed) {
+    return;
+  }
 
-  item.innerHTML = `
-    <span class="file">${escapeHtml(progress.fileName)}</span>
-    ${statusText}
-  `;
+  if (progress.completed) {
+    item.dataset.completed = 'true';
+  }
 
-  // Auto scroll to bottom
+  const fileName = progress.fileName;
+  const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
+  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
+  const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+
+  // 1. Fetch thumbnail once (cached on item)
+  let thumbEl = item.querySelector('.activity-thumb, .activity-badge');
+  if (!thumbEl && !item.dataset.loadingThumb) {
+    item.dataset.loadingThumb = 'true';
+
+    if (imageExts.includes(ext) || videoExts.includes(ext)) {
+      let thumbnailDataUrl = null;
+      try {
+        if (window.droidBridge && window.droidBridge.getFileThumbnail) {
+          thumbnailDataUrl = await window.droidBridge.getFileThumbnail(fileName);
+        }
+      } catch (err) {
+        console.warn('[WiFi] Could not get native thumbnail:', err);
+      }
+
+      if (thumbnailDataUrl) {
+        const img = document.createElement('img');
+        img.className = 'activity-thumb';
+        img.src = thumbnailDataUrl;
+        img.onerror = () => {
+          const badge = document.createElement('div');
+          badge.className = 'activity-badge';
+          badge.textContent = videoExts.includes(ext) ? '🎬' : '🖼️';
+          img.replaceWith(badge);
+        };
+        thumbEl = img;
+      } else {
+        const badge = document.createElement('div');
+        badge.className = 'activity-badge';
+        badge.textContent = videoExts.includes(ext) ? '🎬' : '🖼️';
+        thumbEl = badge;
+      }
+    } else {
+      const iconMap = {
+        mp3: '🎵', wav: '🎵', flac: '🎵', m4a: '🎵', ogg: '🎵',
+        pdf: '📕', doc: '📘', docx: '📘', txt: '📝', json: '💻',
+        zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
+        apk: '📲', dmg: '💿'
+      };
+      const badge = document.createElement('div');
+      badge.className = 'activity-badge';
+      badge.textContent = iconMap[ext] || '📄';
+      thumbEl = badge;
+    }
+    delete item.dataset.loadingThumb;
+  } else if (!thumbEl) {
+    const badge = document.createElement('div');
+    badge.className = 'activity-badge';
+    badge.textContent = videoExts.includes(ext) ? '🎬' : '🖼️';
+    thumbEl = badge;
+  }
+
+  // 2. Build Item Layout
+  item.innerHTML = '';
+
+  const leftDiv = document.createElement('div');
+  leftDiv.className = 'activity-left';
+  leftDiv.appendChild(thumbEl);
+
+  const fileSpan = document.createElement('span');
+  fileSpan.className = 'activity-file-name';
+  fileSpan.textContent = fileName;
+  fileSpan.title = fileName;
+  leftDiv.appendChild(fileSpan);
+
+  const rightDiv = document.createElement('div');
+  rightDiv.className = 'activity-right';
+
+  const isCompleted = progress.completed || item.dataset.completed === 'true';
+
+  if (isCompleted) {
+    const previewBtn = document.createElement('button');
+    previewBtn.className = 'activity-preview-btn';
+    previewBtn.innerHTML = '👁️ Preview';
+    previewBtn.onclick = (e) => {
+      e.stopPropagation();
+      openMacPreview(fileName);
+    };
+    rightDiv.appendChild(previewBtn);
+
+    const statusSpan = document.createElement('span');
+    statusSpan.className = 'status';
+    statusSpan.textContent = '✓ Completed';
+    rightDiv.appendChild(statusSpan);
+  } else {
+    const pctSpan = document.createElement('span');
+    pctSpan.className = 'percent';
+    pctSpan.textContent = `${progress.percent || 0}%`;
+    rightDiv.appendChild(pctSpan);
+  }
+
+  item.appendChild(leftDiv);
+  item.appendChild(rightDiv);
+
   logContainer.scrollTop = logContainer.scrollHeight;
 
-  // If completed, reload local directories (since files are received in the Mac shared folder)
   if (progress.completed) {
     loadLocalFiles(state.localPath);
+  }
+}
+
+function openMacPreview(fileName) {
+  const modal = document.getElementById('mac-preview-modal');
+  const title = document.getElementById('mac-preview-title');
+  const body = document.getElementById('mac-preview-body');
+
+  if (!modal || !body) return;
+
+  // Clean previous media & stop audio playback
+  const existingMedia = body.querySelectorAll('video, audio');
+  existingMedia.forEach(m => {
+    try {
+      m.pause();
+      m.src = '';
+      m.load();
+    } catch(e) {}
+  });
+
+  const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
+  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
+  const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+
+  const sharedDir = state.wifiSharedDir || document.getElementById('wifi-shared-path')?.textContent || '';
+  const fullPath = sharedDir ? `${sharedDir}/${fileName}` : '';
+  const port = state.wifiPort || 8081;
+  const httpUrl = `http://127.0.0.1:${port}/download?file=` + encodeURIComponent(fileName);
+  const localUrl = fullPath ? `file://${encodeURI(fullPath)}` : httpUrl;
+
+  title.textContent = fileName;
+  body.innerHTML = '';
+
+  if (imageExts.includes(ext)) {
+    const img = document.createElement('img');
+    img.src = localUrl;
+    img.alt = fileName;
+    img.onerror = () => {
+      img.src = httpUrl;
+    };
+
+    body.appendChild(img);
+    modal.style.display = 'flex';
+    modal.classList.add('active');
+  } else if (videoExts.includes(ext)) {
+    const video = document.createElement('video');
+    video.controls = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.src = localUrl;
+    video.onerror = () => {
+      video.src = httpUrl;
+    };
+
+    body.appendChild(video);
+    modal.style.display = 'flex';
+    modal.classList.add('active');
+  } else {
+    // For non-media files (PDF, doc, zip, etc.), open directly on Mac
+    if (fullPath) {
+      if (window.droidBridge.openFilePath) {
+        window.droidBridge.openFilePath(fullPath);
+      } else {
+        window.droidBridge.openInFinder(fullPath);
+      }
+    }
+  }
+}
+
+function closeMacPreview(e) {
+  if (e && e.stopPropagation) e.stopPropagation();
+  const modal = document.getElementById('mac-preview-modal');
+  const body = document.getElementById('mac-preview-body');
+  
+  if (body) {
+    const mediaElements = body.querySelectorAll('video, audio');
+    mediaElements.forEach(m => {
+      try {
+        m.pause();
+        m.src = '';
+        m.load();
+      } catch(err) {}
+    });
+    body.innerHTML = '';
+  }
+  
+  if (modal) {
+    modal.style.display = 'none';
+    modal.classList.remove('active');
   }
 }
 

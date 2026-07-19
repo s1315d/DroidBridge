@@ -668,6 +668,14 @@ body {
   z-index: 100;
 }
 
+.overlay.active {
+  display: flex !important;
+}
+
+#mac-preview-modal {
+  z-index: 9999;
+}
+
 .overlay-content {
   text-align: center;
   max-width: 400px;
@@ -1358,6 +1366,13 @@ body {
   gap: 8px;
 }
 
+.wifi-default-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  opacity: 0.8;
+}
+
 .wifi-url-input {
   flex: 1;
   background: rgba(255, 255, 255, 0.05);
@@ -1431,37 +1446,102 @@ body {
 }
 
 .activity-log {
-  height: 120px;
+  height: 170px;
   overflow-y: auto;
-  font-family: monospace;
   font-size: 11px;
   color: var(--text-secondary);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .activity-item {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  padding: 4px 0;
-  border-bottom: 1px dashed rgba(255, 255, 255, 0.03);
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all 0.2s ease;
 }
 
-.activity-item .file {
-  color: var(--primary-light);
+.activity-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  margin-right: 10px;
+}
+
+.activity-thumb {
+  width: 38px;
+  height: 38px;
+  border-radius: 6px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  flex-shrink: 0;
+}
+
+.activity-badge {
+  width: 38px;
+  height: 38px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.activity-file-name {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 320px;
+  max-width: 200px;
+}
+
+.activity-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.activity-preview-btn {
+  background: rgba(108, 92, 231, 0.15);
+  border: 1px solid rgba(108, 92, 231, 0.3);
+  color: var(--primary-light);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.activity-preview-btn:hover {
+  background: var(--primary);
+  color: #fff;
+  box-shadow: 0 0 10px var(--primary-glow);
 }
 
 .activity-item .status {
   color: var(--success);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .activity-item .percent {
   color: var(--warning);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .activity-empty {
@@ -1469,7 +1549,54 @@ body {
   font-style: italic;
   font-size: 11px;
   text-align: center;
-  margin-top: 30px;
+  margin-top: 40px;
+}
+
+/* Mac App Preview Modal */
+.mac-preview-card {
+  width: 90%;
+  max-width: 700px;
+  max-height: 85vh;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-hover);
+  border-radius: 16px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  position: relative;
+}
+
+.mac-preview-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 90%;
+}
+
+.mac-preview-body {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-height: 65vh;
+  overflow: auto;
+  background: #000;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.mac-preview-body img, .mac-preview-body video {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: 6px;
 }
 
 /* Stop Server Button */
