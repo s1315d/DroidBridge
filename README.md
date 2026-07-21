@@ -14,12 +14,16 @@ DroidBridge supports **two powerful modes of operation** to accommodate all user
 ## ✨ Features
 
 ### 🔌 USB Mode (ADB) Features
-- **📱 Multi-Device Auto-Detection**: Automatically detects one or more Android phones connected via USB. Switch between active devices on-the-fly using panel selectors.
+- **📱 Multi-Device Auto-Detection & Display**: Detects one or more Android devices connected via USB. Displays a dynamic multi-device indicator on the landing page to prevent freezing.
+- **⚡ Flexible Connection Choice**: Connecting via USB does not force you into USB mode; you can choose either standard USB Transfer or Wi-Fi mode directly from the landing selector.
+- **🖼️ Image & Video Sidebar Previews**: Select any media file to show interactive thumbnails and metadata directly inside the desktop preview sidebar.
 - **⚡ High-Speed Reliable Transfers**: Bypasses slow macOS MTP services. Built on ADB shell streams for maximum throughput and reliability.
 - **📂 Full Directory Trees**: Recursively copy folders and nested structures bidirectionally between Mac and Android.
 
 ### 📶 Wi-Fi Share Mode (Universal) Features
 - **🍎 Universal iOS & Android Support**: Works natively on **any** device with a web browser (iPhone, iPad, Android, tablets, or other laptops) on the same local Wi-Fi.
+- **📄 Expanded Inline Previews**: Open documents (PDF, text, JSON, HTML) or listen to audio tracks (MP3, WAV, M4A, OGG) directly in your mobile browser tab instead of triggering a forced download.
+- **📦 Any-Format Wireless Uploads**: Send archives, APK packages, images, or documents from your phone directly to your Mac.
 - **📁 Subdirectory Navigation**: Browse folders recursively from your device browser, open subfolders via an inline explorer, download nested files, and upload files directly into specific active subfolders on your Mac.
 - **📷 Offline QR Code Setup**: Automatically scans local IP addresses and prints an offline base64 QR Code. No external internet or setup required!
 
