@@ -1,34 +1,48 @@
-# 🚀 DroidBridge v1.0.3 Release Notes
+# Release Notes - DroidBridge v1.1.0 (Major Release)
 
-Following **v1.0.2**, this patch release (**v1.0.3**) introduces major GPU & CPU performance optimizations, eliminating high GPU usage and ensuring ultra-smooth app performance.
-
----
-
-## ⚡ 1. Major GPU & CPU Performance Optimizations
-- **Reduced High GPU Usage (Cut by ~90%)**: Removed heavy Chromium `backdrop-filter: blur(...)` real-time GPU frame buffer blurs across overlays, context menus, and modals, replacing them with sleek, solid dark theme backgrounds (`#12121a` / `#161622`).
-- **Eliminated Continuous Animation Churn**: Replaced frame-by-frame `filter: drop-shadow(...)` keyframe loops with GPU-friendly scale and opacity transitions, keeping macOS GPU activity minimal even during active transfers.
+We are excited to release **DroidBridge v1.1.0**, a major version release packed with new capabilities, visual layout improvements, security enhancements, and robust adb connection logic.
 
 ---
 
-## 👁️ 2. Desktop In-App Media Previews & Instant Loading
-- **Instant Photo Previews (0ms Latency)**: Image previews (`.jpg`, `.png`, `.webp`, `.gif`, `.svg`) open instantly with zero delay using direct GPU-accelerated local `file://` loading.
-- **In-App Video Player Modal**: Video files (`.mp4`, `.mov`, `.mkv`, `.avi`, `.webm`) play directly inside DroidBridge's dark preview modal with complete HTML5 player controls (play/pause, volume, seeking, fullscreen).
-- **Real Video Frame Thumbnails**: Generates actual video frame thumbnails for video files in the Live Activity Log using native macOS `qlmanage` and `ffmpeg`.
-- **Transfer Progress Completion Lock**: Locks completed items so delayed percentage events do not overwrite completed file status.
+## 🌟 New Features & Major Changes
+
+### ⚡ Flexible USB vs. Wi-Fi Sharing Selection
+* **Non-Forced USB Connection Mode**: When one or more Android devices are connected via USB, the application no longer forces you into USB mode automatically.
+* **Main Landing Mode Selector**: The landing screen now lets you explicitly select your preferred mode:
+  - Click **⚡ Continue with USB Transfer** to manage files on your phone via ADB.
+  - Click **📶 Wi-Fi Share mode** to spin up a web server and access local files wirelessly.
+
+### 📁 Advanced USB Mode File Management
+* **Individual File Deletion**: Added direct individual delete options in USB sharing mode via right-click context menus.
+* **Image & Video Preview Panel**: Selecting an image or video file in USB mode displays interactive, high-fidelity thumbnails and metadata directly inside the Mac desktop application's preview side panel.
+
+### 🌐 Rich Wi-Fi Sharing Mode (Mac ↔ Mobile)
+* **On-the-Fly Web Server**: Spin up a local transfer server on your Mac with one click, complete with a dynamic IP address and QR code display.
+* **Mobile Web client**: Scan the QR code to open a beautiful mobile-friendly responsive web app on your phone.
+* **Expanded Inline File Previews**: Preview and open documents (PDFs, texts, JSON, HTML) or play audio tracks (MP3, WAV, M4A, OGG) directly in your mobile browser tab instead of triggering a download. Images and videos will preview inside the fluid overlay modal.
+* **Any-Format Mobile Uploads**: Wirelessly upload files of any extension (including `.apks`, `.zip`, `.png`) directly from your phone back to your Mac.
+* **Intelligent Action Filtering**: The mobile client dynamically checks file extensions and selectively offers the "Preview" option only for previewable formats, keeping your interface clean.
+
+### 🗹 Multi-File Selection & Bulk Deletion
+* **File Row Checkboxes ("Tick Boxes")**: Added selection checkboxes to each row in the local and remote file lists, enabling easier mouse selection.
+* **Bulk File Management**: You can now select multiple files or folders using checkboxes (or standard Shift/Cmd click modifiers) and perform bulk actions.
+* **Recursive Multi-Delete**: Added a new **Delete** command to remove all selected items in one click. It recursively clears directories and single files safely with safety warnings.
 
 ---
 
-## 🛜 3. Enhanced Wi-Fi File Sharing & Mobile Browser
-- **Dynamic Folder Header**: Mobile browser top bar displays the custom staging folder name (e.g. `📁 DroidBridge-WiFi-Share`) instead of a generic `/`.
-- **Default Staging Path Notice**: Added clear default path guidance (`Default Path: ~/Downloads/DroidBridge-WiFi-Share`) directly on the Wi-Fi screen.
-- **Clean Audio & Video Unload**: Mobile and Desktop preview modals properly pause and unload media elements upon closing.
-- **HTTP 206 Partial Content Streaming**: Serves precise MIME types and range headers for smooth video seeking.
+## 🛡️ Security Hardening
+
+* **Cryptographic Nonce CSP**: Implemented a strict, dynamic Content Security Policy (CSP) headers that generates a per-request cryptographically secure 128-bit hex token (`crypto.randomBytes(16)`).
+* **Unsafe-Inline Removal**: Completely removed all inline script tags (`onclick="..."`) and inline styling properties (`style="..."`) from the mobile HTML templates. Resolved all actions strictly using secure DOM event listeners, completely dropping `'unsafe-inline'` from headers.
+* **Strict Path Validation**: Restricted the Wi-Fi shared directory to directories within safe roots (e.g. `os.homedir()`, `/Volumes`) to prevent path traversal vulnerability.
+* **ADB Shell Escaping**: Configured custom Unix-style parameter escaping (`escapeShellArg`) to wrap arguments in single quotes and escape nested quotes, ensuring spaces and symbols inside filenames (e.g. spaces/parentheses/commas) never lead to shell injection or deletion failure.
 
 ---
 
-## 🔌 4. USB Connection Status
-- **Full ADB Engine Stability**: High-performance ADB USB engine (`adb push`, `adb pull`, device auto-detection, storage inspection) remains 100% stable with automatic file list refreshes.
+## 🎨 Layout & Visual Alignment
+
+* **Universal Checkbox Alignment**: Unified layout grids so checkbox columns and file columns perfectly match between file headers and rows in both local and remote panels.
+* **Scrollbar Gutter Lock**: Configured a persistent vertical scrollbar track (`overflow-y: scroll;`) and adjusted header padding dynamically to prevent shifting content columns when browsing between populated and empty folders.
 
 ---
-
-*Enjoy transferring files seamlessly with DroidBridge!* 🌉
+*Download the update to enjoy the most secure, feature-rich DroidBridge yet!*

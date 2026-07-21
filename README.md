@@ -149,7 +149,7 @@ Run the following command:
 
    ```bash
    xattr -cr /path/to/DroidBridge.app
-
+ 
    ```
 
 (Tip: Type xattr -cr and drag DroidBridge.app into the terminal to auto-fill the path!)

@@ -52,6 +52,7 @@
               <option value="mac">💻 macOS Filesystem</option>
             </select>
             <div class="panel-actions">
+              <button id="btn-delete-local" class="delete-btn" disabled title="Delete selected local files">🗑️ Delete</button>
               <button id="btn-compare-local" class="compare-btn" title="Compare folders by name and size">⚖️ Compare</button>
               <button id="btn-refresh-local" class="refresh-btn" title="Refresh local directory">🔄</button>
             </div>
@@ -63,11 +64,15 @@
           </div>
         </div>
         <div class="file-list-header">
-          <span></span>
-          <span class="sortable" data-sort="name" data-panel="local">Name</span>
-          <span class="sortable" data-sort="kind" data-panel="local">Kind</span>
-          <span class="sortable" data-sort="size" data-panel="local">Size</span>
-          <span class="sortable" data-sort="date" data-panel="local">Modified</span>
+          <span class="col-icon"></span>
+          <span class="sortable col-name" data-sort="name" data-panel="local">Name</span>
+          <span class="sortable col-kind" data-sort="kind" data-panel="local">Kind</span>
+          <span class="sortable col-size" data-sort="size" data-panel="local">Size</span>
+          <span class="sortable col-date" data-sort="date" data-panel="local">Modified</span>
+          <div class="col-actions">
+            <input type="checkbox" id="local-select-all" class="header-checkbox" title="Select / Deselect All">
+            <span class="col-actions-spacer"></span>
+          </div>
         </div>
         <div id="local-file-list" class="file-list"></div>
       </div>
@@ -93,6 +98,7 @@
               <option value="mac">💻 macOS Filesystem</option>
             </select>
             <div class="panel-actions">
+              <button id="btn-delete-remote" class="delete-btn" disabled title="Delete selected remote files">🗑️ Delete</button>
               <button id="btn-compare-remote" class="compare-btn" title="Compare folders by name and size">⚖️ Compare</button>
               <button id="btn-refresh-remote" class="refresh-btn" title="Refresh remote directory">🔄</button>
             </div>
@@ -104,11 +110,15 @@
           </div>
         </div>
         <div class="file-list-header">
-          <span></span>
-          <span class="sortable" data-sort="name" data-panel="remote">Name</span>
-          <span class="sortable" data-sort="kind" data-panel="remote">Kind</span>
-          <span class="sortable" data-sort="size" data-panel="remote">Size</span>
-          <span class="sortable" data-sort="date" data-panel="remote">Modified</span>
+          <span class="col-icon"></span>
+          <span class="sortable col-name" data-sort="name" data-panel="remote">Name</span>
+          <span class="sortable col-kind" data-sort="kind" data-panel="remote">Kind</span>
+          <span class="sortable col-size" data-sort="size" data-panel="remote">Size</span>
+          <span class="sortable col-date" data-sort="date" data-panel="remote">Modified</span>
+          <div class="col-actions">
+            <input type="checkbox" id="remote-select-all" class="header-checkbox" title="Select / Deselect All">
+            <span class="col-actions-spacer"></span>
+          </div>
         </div>
         <div id="remote-file-list" class="file-list"></div>
       </div>
@@ -167,9 +177,14 @@
           <span class="step-text">Connect your phone via USB and tap <strong>"Allow"</strong> on the prompt</span>
         </div>
       </div>
-      <div class="setup-divider"><span>OR</span></div>
-      <button id="btn-start-wifi-setup" class="wifi-setup-btn">📶 Start Wi-Fi Transfer Mode</button>
-      <p class="wifi-btn-compat-note">📱 Supports any browser (iPhone 🍎, iPad 🍏, Android 🤖, Mac 💻, Laptop, etc.)</p>
+      <div class="landing-actions-container">
+        <button id="btn-start-usb-transfer" class="usb-start-btn" disabled title="Connect phone via USB to enable USB transfer">
+          ⚡ Continue with USB Transfer
+        </button>
+        <div class="setup-divider"><span>OR</span></div>
+        <button id="btn-start-wifi-setup" class="wifi-setup-btn">📶 Start Wi-Fi Transfer Mode</button>
+      </div>
+      <p id="usb-status-hint" class="wifi-btn-compat-note">🔌 Connect Android phone via USB to enable USB transfer, or click Wi-Fi mode anytime</p>
     </div>
   </div>
 
@@ -254,7 +269,7 @@
       <button class="close-about-btn" id="btn-close-about">✕</button>
       <img src="icon.png" class="about-icon" alt="DroidBridge Icon">
       <h2 class="about-title">DroidBridge</h2>
-      <p class="about-version">Version 1.0.0</p>
+      <p class="about-version">Version 1.1.0</p>
       
       <div class="about-divider"></div>
       
@@ -283,6 +298,39 @@
       
       <div class="about-footer">
         <p>© 2026 DroidBridge. MIT License.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Overlay: Two-Step Delete Confirmation -->
+  <div id="delete-modal" class="overlay">
+    <div class="overlay-content delete-modal-card">
+      <button class="close-about-btn" id="btn-close-delete">✕</button>
+      
+      <!-- Step 1: Initial Intent Confirmation -->
+      <div id="delete-step-1" class="delete-step-container">
+        <div class="overlay-icon warning-icon">⚠️</div>
+        <h2 class="overlay-title">Are you sure?</h2>
+        <p id="delete-step1-msg" class="overlay-text">Are you sure you want to delete the selected item(s)?</p>
+        <div id="delete-file-preview-list" class="delete-file-preview-list"></div>
+        <div class="delete-modal-buttons">
+          <button id="btn-cancel-delete-1" class="modal-btn secondary">Cancel</button>
+          <button id="btn-next-delete-1" class="modal-btn warning">Continue</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Final Confirmation / Warning -->
+      <div id="delete-step-2" class="delete-step-container" style="display: none;">
+        <div id="delete-step2-icon" class="overlay-icon danger-icon">🚨</div>
+        <h2 id="delete-step2-title" class="overlay-title danger-title">PERMANENT DELETION WARNING</h2>
+        <div id="delete-step2-caution-box" class="delete-caution-box">
+          <p id="delete-step2-bold" class="caution-bold">⚠️ Warning: Selected files/folders will be PERMANENTLY deleted from your storage.</p>
+          <p id="delete-step2-sub" class="caution-sub">Once deleted, these files CANNOT be recovered or restored!</p>
+        </div>
+        <div class="delete-modal-buttons">
+          <button id="btn-cancel-delete-2" class="modal-btn secondary">Cancel</button>
+          <button id="btn-confirm-delete-final" class="modal-btn danger">🗑️ Yes, Delete Permanently</button>
+        </div>
       </div>
     </div>
   </div>

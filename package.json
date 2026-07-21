@@ -1,6 +1,6 @@
 {
   "name": "droidbridge",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Premium Mac ↔ Android file transfer app",
   "main": "main.js",
   "scripts": {

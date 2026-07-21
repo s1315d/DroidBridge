@@ -7,7 +7,61 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage } = requir
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
+
+// Prevent EPIPE uncaught exception crashes when stdout/stderr pipes close
+if (process.stdout && process.stdout.on) {
+  process.stdout.on('error', () => {});
+}
+if (process.stderr && process.stderr.on) {
+  process.stderr.on('error', () => {});
+}
+
+// Redirect console logs to a safe file in production to avoid EPIPE crashes
+let logFile = null;
+app.whenReady().then(() => {
+  try {
+    logFile = path.join(app.getPath('userData'), 'droidbridge.log');
+    // Clear old log file on start
+    fs.writeFileSync(logFile, `--- DroidBridge Log Started: ${new Date().toISOString()} ---\n`);
+  } catch (e) {}
+});
+
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+
+const safeWriteLog = (level, args) => {
+  const msg = `[${new Date().toISOString()}] [${level}] ` + 
+    args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : a).join(' ') + '\n';
+  
+  // Also write to original if not packaged
+  if (!app.isPackaged) {
+    try {
+      if (level === 'ERROR') originalError.apply(console, args);
+      else if (level === 'WARN') originalWarn.apply(console, args);
+      else originalLog.apply(console, args);
+    } catch (e) {}
+  }
+  
+  if (logFile) {
+    try {
+      fs.appendFileSync(logFile, msg);
+    } catch (e) {}
+  }
+};
+
+console.log = (...args) => safeWriteLog('INFO', args);
+console.error = (...args) => safeWriteLog('ERROR', args);
+console.warn = (...args) => safeWriteLog('WARN', args);
+
+process.on('uncaughtException', (err) => {
+  if (err && (err.code === 'EPIPE' || (err.message && err.message.includes('EPIPE')))) {
+    return;
+  }
+  safeWriteLog('FATAL', [err ? err.stack || err.message || err : 'Unknown error']);
+});
 
 // Set application name early
 app.name = 'DroidBridge';
@@ -19,6 +73,31 @@ let win = null;
 let cachedAdbPath = undefined;       // undefined = not yet searched, null = not found
 let knownDeviceIds = new Set();      // Track connected devices for change detection
 let devicePollInterval = null;
+
+// ─── Allowed directories for local file browsing ────────────────────────────
+const ALLOWED_LOCAL_DIRS = [
+  os.homedir(),
+  path.join(os.homedir(), 'Desktop'),
+  path.join(os.homedir(), 'Documents'),
+  path.join(os.homedir(), 'Downloads'),
+  '/',
+];
+
+/**
+ * Check if a resolved path is within allowed directories.
+ * @param {string} resolvedPath  An already-resolved absolute path
+ * @returns {boolean}
+ */
+function isPathAllowed(resolvedPath) {
+  // Always allow temp dir (for cleanupDir)
+  const tmpDir = os.tmpdir();
+  if (resolvedPath.startsWith(path.resolve(tmpDir))) return true;
+  // Check allowed local dirs
+  for (const dir of ALLOWED_LOCAL_DIRS) {
+    if (resolvedPath.startsWith(dir)) return true;
+  }
+  return false;
+}
 
 // ─── ADB Helper Functions ────────────────────────────────────────────────────
 
@@ -70,6 +149,15 @@ async function findAdb() {
   console.warn('[ADB] Not found on this system');
   cachedAdbPath = null;
   return null;
+}
+
+/**
+ * Escape an argument for safe execution in Android shell via adb shell.
+ * Wraps argument in single quotes and escapes existing single quotes.
+ */
+function escapeShellArg(arg) {
+  if (typeof arg !== 'string') return '';
+  return `'` + arg.replace(/'/g, "'\\''") + `'`;
 }
 
 /**
@@ -135,13 +223,21 @@ function parseAdbLsOutput(output) {
     // Skip . and .. entries
     if (name === '.' || name === '..') continue;
 
-    const isDirectory = permissions.startsWith('d');
+    let isDirectory = permissions.startsWith('d');
     let isSymlink = permissions.startsWith('l');
 
     // Symlinks show as  "name -> target" — strip the target
     if (name.includes(' -> ')) {
       isSymlink = true;
-      name = name.split(' -> ')[0];
+      const parts = name.split(' -> ');
+      name = parts[0];
+      const target = parts[1] || '';
+      // If symlink target ends with slash or has no extension, treat as directory
+      if (target.endsWith('/') || !path.extname(name)) {
+        isDirectory = true;
+      }
+    } else if (isSymlink && !path.extname(name)) {
+      isDirectory = true;
     }
 
     entries.push({ name, isDirectory, isSymlink, size, modified, permissions });
@@ -164,7 +260,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      webSecurity: false,
+      sandbox: true,
       preload: path.join(__dirname, 'preload.js'),
     },
     show: false,
@@ -321,26 +417,42 @@ ipcMain.handle('get-storage-info', async (_event, deviceId) => {
 // 5. Browse local filesystem
 ipcMain.handle('list-local-files', async (_event, dirPath) => {
   try {
-    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
-    const files = [];
+    const resolvedPath = path.resolve(dirPath);
+    if (!isPathAllowed(resolvedPath)) {
+      console.warn(`[IPC] list-local-files denied: ${resolvedPath}`);
+      return { currentPath: dirPath, files: [] };
+    }
+    const entries = await fs.promises.readdir(resolvedPath, { withFileTypes: true });
 
-    for (const entry of entries) {
+    const filePromises = entries.map(async (entry) => {
       try {
         const fullPath = path.join(dirPath, entry.name);
         const stat = await fs.promises.stat(fullPath);
 
-        files.push({
+        let itemCount;
+        if (entry.isDirectory()) {
+          try {
+            const subEntries = await fs.promises.readdir(fullPath);
+            itemCount = subEntries.length;
+          } catch (e) {}
+        }
+
+        return {
           name: entry.name,
           isDirectory: entry.isDirectory(),
+          itemCount,
           size: stat.size,
           modified: stat.mtime.toISOString(),
           extension: entry.isDirectory() ? '' : path.extname(entry.name).slice(1),
           fullPath,
-        });
+        };
       } catch {
-        // Permission error or broken symlink — skip gracefully
+        return null;
       }
-    }
+    });
+
+    const fileResults = await Promise.all(filePromises);
+    const files = fileResults.filter(Boolean);
 
     // Sort: directories first, then alphabetical (case-insensitive)
     files.sort((a, b) => {
@@ -358,16 +470,26 @@ ipcMain.handle('list-local-files', async (_event, dirPath) => {
 // 6. Browse remote (device) filesystem
 ipcMain.handle('list-remote-files', async (_event, { deviceId, dirPath }) => {
   try {
-    const { stdout } = await runAdb(['-s', deviceId, 'shell', 'ls', '-la', dirPath]);
-    const parsed = parseAdbLsOutput(stdout);
+    const targetPath = (dirPath && !dirPath.endsWith('/')) ? dirPath + '/' : dirPath;
+    let { stdout } = await runAdb(['-s', deviceId, 'shell', 'ls', '-la', escapeShellArg(targetPath)]);
+    let parsed = parseAdbLsOutput(stdout);
+
+    // Fallback: if listing returned only 1 entry matching the symlink itself, force trailing slash
+    if (parsed.length === 1 && parsed[0].name === path.basename(dirPath)) {
+      const retryRes = await runAdb(['-s', deviceId, 'shell', 'ls', '-la', escapeShellArg(dirPath + '/')]);
+      if (retryRes.stdout) {
+        parsed = parseAdbLsOutput(retryRes.stdout);
+      }
+    }
 
     const files = parsed.map((entry) => ({
       name: entry.name,
       isDirectory: entry.isDirectory,
+      isSymlink: entry.isSymlink,
       size: entry.size,
       modified: entry.modified,
       permissions: entry.permissions,
-      fullPath: dirPath.replace(/\/+$/, '') + '/' + entry.name,
+      fullPath: (dirPath.replace(/\/+$/, '') + '/' + entry.name).replace(/\/+/g, '/'),
     }));
 
     // Sort: directories first, then alphabetical
@@ -409,7 +531,7 @@ function getLocalFilesRecursive(baseDir, currentDir) {
 
 async function getRemoteFilesRecursive(deviceId, remotePath) {
   try {
-    const { stdout } = await runAdb(['-s', deviceId, 'shell', 'find', remotePath, '-type', 'f']);
+    const { stdout } = await runAdb(['-s', deviceId, 'shell', 'find', escapeShellArg(remotePath), '-type', 'f']);
     return stdout.split('\n').map(line => line.trim()).filter(Boolean);
   } catch (err) {
     console.error(`[RemoteRecursive] find failed for ${remotePath}:`, err.message);
@@ -438,7 +560,7 @@ function getRemoteRelative(parentPath, filePath) {
 
 async function remoteFileExists(deviceId, remotePath) {
   try {
-    await runAdb(['-s', deviceId, 'shell', 'test', '-e', remotePath]);
+    await runAdb(['-s', deviceId, 'shell', 'test', '-e', escapeShellArg(remotePath)]);
     return true;
   } catch {
     return false;
@@ -541,7 +663,7 @@ ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }
         }
 
         if (conflictResolution !== 'replace-all') {
-          const response = dialog.showMessageBoxSync(win, {
+          const response = await dialog.showMessageBox(win, {
             type: 'question',
             buttons: ['Replace', 'Replace All', 'Skip', 'Skip All', 'Cancel'],
             defaultId: 0,
@@ -549,18 +671,19 @@ ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }
             title: 'File Conflict',
             message: `The file "${file.relativePath}" already exists on the phone.\nWhat would you like to do?`
           });
+          const responseIdx = response.response;
 
-          if (response === 1) { // Replace All
+          if (responseIdx === 1) { // Replace All
             conflictResolution = 'replace-all';
-          } else if (response === 2) { // Skip
+          } else if (responseIdx === 2) { // Skip
             continue;
-          } else if (response === 3) { // Skip All
+          } else if (responseIdx === 3) { // Skip All
             conflictResolution = 'skip-all';
             continue;
-          } else if (response === 4) { // Cancel
+          } else if (responseIdx === 4) { // Cancel
             break; // Abort the whole batch
           }
-          // response === 0 (Replace) -> continues to transfer
+          // responseIdx === 0 (Replace) -> continues to transfer
         }
       }
 
@@ -568,7 +691,7 @@ ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }
 
       // Ensure the remote parent directory exists first
       if (remoteDestDir && remoteDestDir !== '/storage/emulated/0' && remoteDestDir !== '/sdcard') {
-        await runAdb(['-s', deviceId, 'shell', 'mkdir', '-p', remoteDestDir]);
+        await runAdb(['-s', deviceId, 'shell', 'mkdir', '-p', escapeShellArg(remoteDestDir)]);
       }
 
       // Send initial progress for this file
@@ -665,7 +788,7 @@ ipcMain.handle('pull-files', async (_event, { deviceId, remotePaths, localPath }
         }
 
         if (conflictResolution !== 'replace-all') {
-          const response = dialog.showMessageBoxSync(win, {
+          const response = await dialog.showMessageBox(win, {
             type: 'question',
             buttons: ['Replace', 'Replace All', 'Skip', 'Skip All', 'Cancel'],
             defaultId: 0,
@@ -673,18 +796,19 @@ ipcMain.handle('pull-files', async (_event, { deviceId, remotePaths, localPath }
             title: 'File Conflict',
             message: `The file "${file.relativePath}" already exists on your Mac.\nWhat would you like to do?`
           });
+          const responseIdx = response.response;
 
-          if (response === 1) { // Replace All
+          if (responseIdx === 1) { // Replace All
             conflictResolution = 'replace-all';
-          } else if (response === 2) { // Skip
+          } else if (responseIdx === 2) { // Skip
             continue;
-          } else if (response === 3) { // Skip All
+          } else if (responseIdx === 3) { // Skip All
             conflictResolution = 'skip-all';
             continue;
-          } else if (response === 4) { // Cancel
+          } else if (responseIdx === 4) { // Cancel
             break; // Abort
           }
-          // response === 0 (Replace) -> continues to transfer
+          // responseIdx === 0 (Replace) -> continues to transfer
         }
       }
 
@@ -744,11 +868,15 @@ ipcMain.handle('pull-files', async (_event, { deviceId, remotePaths, localPath }
   return { success: failed === 0, transferred, failed, errors };
 });
 
+ipcMain.handle('get-app-version', () => {
+  return app.getVersion();
+});
+
 // 9. Delete a file or directory on the device
 ipcMain.handle('delete-remote', async (_event, { deviceId, remotePath }) => {
   try {
-    await runAdb(['-s', deviceId, 'shell', 'rm', '-rf', remotePath]);
-    console.log(`[Delete] Removed: ${remotePath}`);
+    await runAdb(['-s', deviceId, 'shell', 'rm', '-rf', escapeShellArg(remotePath)]);
+    console.log(`[Delete] Removed remote: ${remotePath}`);
     return { success: true };
   } catch (err) {
     console.error('[IPC] delete-remote error:', err.message);
@@ -756,10 +884,33 @@ ipcMain.handle('delete-remote', async (_event, { deviceId, remotePath }) => {
   }
 });
 
+// Delete local file or directory on Mac (moves to macOS Trash)
+ipcMain.handle('delete-local', async (_event, filePath) => {
+  try {
+    const resolvedPath = path.resolve(filePath);
+    if (!isPathAllowed(resolvedPath)) {
+      return { success: false, error: 'Access denied' };
+    }
+    if (fs.existsSync(resolvedPath)) {
+      if (shell && shell.trashItem) {
+        await shell.trashItem(resolvedPath);
+      } else {
+        fs.rmSync(resolvedPath, { recursive: true, force: true });
+      }
+      console.log(`[Delete] Moved to trash: ${resolvedPath}`);
+      return { success: true };
+    }
+    return { success: false, error: 'File not found' };
+  } catch (err) {
+    console.error('[IPC] delete-local error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
 // 10. Create a directory on the device
 ipcMain.handle('create-remote-dir', async (_event, { deviceId, remotePath }) => {
   try {
-    await runAdb(['-s', deviceId, 'shell', 'mkdir', '-p', remotePath]);
+    await runAdb(['-s', deviceId, 'shell', 'mkdir', '-p', escapeShellArg(remotePath)]);
     console.log(`[Mkdir] Created: ${remotePath}`);
     return { success: true };
   } catch (err) {
@@ -791,9 +942,15 @@ ipcMain.handle('select-files', async () => {
   return result.filePaths;
 });
 
-// 14. Reveal a file in Finder
+// 14. Reveal a file in Finder (only allowed paths)
 ipcMain.handle('open-in-finder', (_event, filePath) => {
-  shell.showItemInFolder(filePath);
+  if (!filePath) return;
+  const resolvedPath = path.resolve(filePath);
+  if (isPathAllowed(resolvedPath)) {
+    shell.showItemInFolder(resolvedPath);
+  } else {
+    console.warn(`[IPC] open-in-finder denied: ${resolvedPath}`);
+  }
 });
 
 // 15. Create a temporary transfer directory on Mac
@@ -806,9 +963,14 @@ ipcMain.handle('get-temp-dir', () => {
 // 16. Delete a temporary transfer directory on Mac
 ipcMain.handle('cleanup-dir', (_event, dirPath) => {
   try {
-    if (dirPath.includes('droidbridge-temp-')) { // Safety check to prevent deleting arbitrary directories
-      fs.rmSync(dirPath, { recursive: true, force: true });
-      console.log(`[Cleanup] Deleted temp transfer dir: ${dirPath}`);
+    const resolvedPath = path.resolve(dirPath);
+    const tmpDir = path.resolve(os.tmpdir());
+    // Only allow deletion of paths that actually resolve inside the system temp directory
+    if (resolvedPath.startsWith(tmpDir) && resolvedPath.includes('droidbridge-temp-')) {
+      fs.rmSync(resolvedPath, { recursive: true, force: true });
+      console.log(`[Cleanup] Deleted temp transfer dir: ${resolvedPath}`);
+    } else {
+      console.warn(`[Cleanup] Rejected deletion attempt outside tmpdir: ${resolvedPath}`);
     }
   } catch (err) {
     console.error('[IPC] cleanup-dir error:', err.message);
@@ -831,6 +993,26 @@ let wifiServer = null;
 let wifiPort = 8080;
 let wifiActive = false;
 let wifiQrDataUrl = '';
+let wifiRateLimitMap = new Map(); // IP -> request count for basic rate limiting
+
+/**
+ * Check if a path is within the allowed Wi-Fi shared directory (resolves symlinks).
+ */
+function isWifiPathAllowed(targetPath) {
+  try {
+    const resolvedTarget = path.resolve(targetPath);
+    // Find the closest existing parent directory in the path ancestry to check realpath
+    let dir = resolvedTarget;
+    while (dir && dir !== '/' && !fs.existsSync(dir)) {
+      dir = path.dirname(dir);
+    }
+    const resolvedTargetReal = fs.realpathSync(dir);
+    const resolvedShare = fs.realpathSync(wifiSharedDir);
+    return resolvedTargetReal.startsWith(resolvedShare);
+  } catch {
+    return false;
+  }
+}
 
 function getLocalIpAddress() {
   const interfaces = os.networkInterfaces();
@@ -846,13 +1028,15 @@ function getLocalIpAddress() {
 }
 
 // Mobile Web UI template
-const mobileHtml = `<!DOCTYPE html>
+function getMobileHtml(nonce = '') {
+  const currentFolderName = path.basename(wifiSharedDir) || 'Shared';
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>DroidBridge WiFi Share</title>
-  <style>
+  <style nonce="${nonce}">
     :root {
       --bg: #0a0a0f;
       --card: #12121a;
@@ -930,7 +1114,16 @@ const mobileHtml = `<!DOCTYPE html>
       font-size: 11px;
       color: var(--text-muted);
     }
-    #file-input { display: none; }
+    #file-input {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0.001;
+      z-index: 10;
+      cursor: pointer;
+      display: block;
+    }
     .progress-container {
       margin-top: 16px;
       display: none;
@@ -1132,6 +1325,7 @@ const mobileHtml = `<!DOCTYPE html>
       transition: opacity 0.25s ease;
       padding: 16px;
     }
+    .hidden { display: none !important; }
     .modal-overlay.active {
       opacity: 1;
       pointer-events: auto;
@@ -1201,12 +1395,12 @@ const mobileHtml = `<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <label class="upload-zone" id="drop-zone">
+    <div class="upload-zone" id="drop-zone">
       <div class="upload-icon">📤</div>
       <div class="upload-text">Upload files to Mac</div>
       <div class="upload-sub">Tap here to choose files</div>
       <input type="file" id="file-input" multiple>
-    </label>
+    </div>
 
     <div class="progress-container" id="progress-box">
       <div class="progress-info">
@@ -1223,8 +1417,8 @@ const mobileHtml = `<!DOCTYPE html>
     <div class="section-title">Download from Mac</div>
     
     <div class="browser-header">
-      <button class="back-btn" id="btn-back" style="display: none;" onclick="navigateBack()">← Back</button>
-      <span class="current-path" id="path-display">/</span>
+      <button class="back-btn hidden" id="btn-back">← Back</button>
+      <span class="current-path" id="path-display">📁 ${currentFolderName}</span>
     </div>
 
     <ul class="file-list" id="files-container">
@@ -1237,17 +1431,17 @@ const mobileHtml = `<!DOCTYPE html>
   </div>
 
   <!-- Modal Preview Overlay -->
-  <div id="preview-modal" class="modal-overlay" onclick="closePreviewModal(event)">
-    <div class="modal-content" onclick="event.stopPropagation()">
+  <div id="preview-modal" class="modal-overlay">
+    <div class="modal-content" id="modal-card">
       <div class="modal-header">
         <span id="modal-filename">File Preview</span>
-        <button class="modal-close" onclick="closePreviewModal()">&times;</button>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
       </div>
       <div class="modal-body" id="modal-body"></div>
     </div>
   </div>
 
-  <script>
+  <script nonce="${nonce}">
     const fileInput = document.getElementById('file-input');
     const progressBox = document.getElementById('progress-box');
     const progressFile = document.getElementById('progress-file');
@@ -1274,17 +1468,20 @@ const mobileHtml = `<!DOCTYPE html>
 
       if (imageExts.includes(ext)) {
         const img = document.createElement('img');
-        img.src = fileUrl;
+        img.src = fileUrl + '&inline=1';
         body.appendChild(img);
       } else if (videoExts.includes(ext)) {
         const video = document.createElement('video');
-        video.src = fileUrl;
+        video.src = fileUrl + '&inline=1';
         video.controls = true;
         video.autoplay = true;
         video.playsInline = true;
         body.appendChild(video);
+      } else if (ext === 'pdf' || ext === 'txt' || ext === 'html' || ext === 'json') {
+        window.open(fileUrl + '&inline=1', '_blank');
+        return;
       } else {
-        window.open(fileUrl, '_blank');
+        window.open(fileUrl + '&dl=1', '_blank');
         return;
       }
       
@@ -1376,7 +1573,7 @@ const mobileHtml = `<!DOCTYPE html>
         
         // Update breadcrumb UI
         pathDisplay.textContent = currentPath ? '📁 ' + rootFolderName + ' / ' + currentPath : '📁 ' + rootFolderName;
-        btnBack.style.display = currentPath ? 'block' : 'none';
+        btnBack.classList.toggle('hidden', !currentPath);
 
         filesContainer.innerHTML = '';
         if (files.length === 0) {
@@ -1422,11 +1619,25 @@ const mobileHtml = `<!DOCTYPE html>
             openBtn.onclick = () => navigateInto(f.name);
             actionGroup.appendChild(openBtn);
           } else {
-            const previewBtn = document.createElement('button');
-            previewBtn.className = 'preview-btn';
-            previewBtn.textContent = '👁️ Preview';
-            previewBtn.onclick = () => openPreview(f.name, relativeFilePath);
-            actionGroup.appendChild(previewBtn);
+            const ext = f.name.includes('.') ? f.name.split('.').pop().toLowerCase() : '';
+            const previewableExts = [
+              // Images
+              'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg',
+              // Videos
+              'mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp',
+              // Audio
+              'mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac',
+              // Docs/Text
+              'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'json', 'html', 'xml', 'csv'
+            ];
+
+            if (previewableExts.includes(ext)) {
+              const previewBtn = document.createElement('button');
+              previewBtn.className = 'preview-btn';
+              previewBtn.textContent = '👁️ Preview';
+              previewBtn.onclick = () => openPreview(f.name, relativeFilePath);
+              actionGroup.appendChild(previewBtn);
+            }
 
             const dlBtn = document.createElement('a');
             dlBtn.className = 'download-btn';
@@ -1520,14 +1731,37 @@ const mobileHtml = `<!DOCTYPE html>
       dropZone.classList.add('dragover');
     });
     dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-    dropZone.addEventListener('drop', (e) => {
+    dropZone.addEventListener('drop', async (e) => {
       e.preventDefault();
       dropZone.classList.remove('dragover');
-      if (e.dataTransfer.files.length > 0) {
-        fileInput.files = e.dataTransfer.files;
-        fileInput.dispatchEvent(new Event('change'));
+      const droppedFiles = e.dataTransfer.files;
+      if (droppedFiles.length > 0) {
+        progressBox.style.display = 'block';
+        for (let i = 0; i < droppedFiles.length; i++) {
+          const file = droppedFiles[i];
+          progressFile.textContent = file.name;
+          progressPercent.textContent = '0%';
+          progressFill.style.width = '0%';
+          try {
+            await uploadFile(file);
+          } catch (err) {
+            alert('Upload failed: ' + file.name);
+          }
+        }
+        progressBox.style.display = 'none';
+        loadFiles();
       }
     });
+
+    // Modal & Back Button Event Listeners
+    btnBack.addEventListener('click', navigateBack);
+    document.getElementById('modal-close-btn')?.addEventListener('click', closePreviewModal);
+    const previewModal = document.getElementById('preview-modal');
+    if (previewModal) {
+      previewModal.addEventListener('click', (e) => {
+        if (e.target === previewModal) closePreviewModal();
+      });
+    }
 
     // Boot
     loadFiles();
@@ -1535,10 +1769,15 @@ const mobileHtml = `<!DOCTYPE html>
 </body>
 </html>
 `;
+}
 
 // Start Wi-Fi Server
+let wifiRetryCount = 0;
+const WIFI_MAX_RETRIES = 20;
+
 async function startWifiServer() {
   if (wifiActive) {
+    wifiRetryCount = 0;
     return {
       success: true,
       port: wifiPort,
@@ -1572,9 +1811,34 @@ async function startWifiServer() {
       
       // Serve Mobile UI
       if (reqUrl.pathname === '/' && req.method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(mobileHtml);
+        const nonce = crypto.randomBytes(16).toString('hex');
+        res.writeHead(200, {
+          'Content-Type': 'text/html',
+          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:;`
+        });
+        res.end(getMobileHtml(nonce));
         return;
+      }
+
+      // Simple rate limiting: 120 requests per minute per IP
+      const clientIp = req.socket.remoteAddress;
+      const now = Date.now();
+      const windowMs = 60000;
+      if (!wifiRateLimitMap.has(clientIp)) {
+        wifiRateLimitMap.set(clientIp, { count: 1, windowStart: now });
+      } else {
+        const entry = wifiRateLimitMap.get(clientIp);
+        if (now - entry.windowStart > windowMs) {
+          entry.count = 1;
+          entry.windowStart = now;
+        } else {
+          entry.count++;
+          if (entry.count > 120) {
+            res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': '60' });
+            res.end('Too Many Requests');
+            return;
+          }
+        }
       }
 
       // Serve JSON list of shared files
@@ -1582,7 +1846,7 @@ async function startWifiServer() {
         try {
           const subPath = reqUrl.searchParams.get('path') || '';
           const targetPath = path.resolve(wifiSharedDir, subPath);
-          if (!targetPath.startsWith(wifiSharedDir)) {
+          if (!isWifiPathAllowed(targetPath)) {
             res.writeHead(403, { 'Content-Type': 'text/plain' });
             res.end('Access Denied');
             return;
@@ -1615,7 +1879,7 @@ async function startWifiServer() {
           return;
         }
         const filePath = path.resolve(wifiSharedDir, fileName);
-        if (!filePath.startsWith(wifiSharedDir)) {
+        if (!isWifiPathAllowed(filePath)) {
           res.writeHead(403, { 'Content-Type': 'text/plain' });
           res.end('Access Denied');
           return;
@@ -1641,13 +1905,10 @@ async function startWifiServer() {
         };
 
         const contentType = mimeTypes[ext] || 'application/octet-stream';
-        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
-        const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
-        const audioExts = ['mp3', 'wav', 'flac', 'm4a', 'ogg'];
-        const isInline = reqUrl.searchParams.get('inline') === '1' || imageExts.includes(ext) || videoExts.includes(ext) || audioExts.includes(ext);
+        const isInline = reqUrl.searchParams.get('inline') === '1';
 
         const range = req.headers.range;
-        if (range && videoExts.includes(ext)) {
+        if (range) {
           const parts = range.replace(/bytes=/, "").split("-");
           const start = parseInt(parts[0], 10);
           const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
@@ -1658,8 +1919,9 @@ async function startWifiServer() {
             'Accept-Ranges': 'bytes',
             'Content-Length': chunksize,
             'Content-Type': contentType,
-            'Access-Control-Allow-Origin': '*'
           });
+          // Clean up read stream if client disconnects
+          res.on('close', () => { file.destroy(); });
           file.pipe(res);
           return;
         }
@@ -1668,7 +1930,6 @@ async function startWifiServer() {
           'Content-Type': contentType,
           'Content-Length': stat.size,
           'Accept-Ranges': 'bytes',
-          'Access-Control-Allow-Origin': '*'
         };
 
         if (!isInline || reqUrl.searchParams.get('dl') === '1') {
@@ -1676,7 +1937,9 @@ async function startWifiServer() {
         }
 
         res.writeHead(200, headers);
-        fs.createReadStream(filePath).pipe(res);
+        const readStream = fs.createReadStream(filePath);
+        res.on('close', () => { readStream.destroy(); });
+        readStream.pipe(res);
         return;
       }
 
@@ -1690,7 +1953,7 @@ async function startWifiServer() {
         }
         const fileName = decodeURIComponent(rawFileName);
         const filePath = path.resolve(wifiSharedDir, fileName);
-        if (!filePath.startsWith(wifiSharedDir)) {
+        if (!isWifiPathAllowed(filePath)) {
           res.writeHead(403, { 'Content-Type': 'text/plain' });
           res.end('Access Denied');
           return;
@@ -1749,8 +2012,16 @@ async function startWifiServer() {
     wifiServer.on('error', (err) => {
       console.error('[WiFi] Server error:', err.message);
       if (err.code === 'EADDRINUSE') {
+        wifiRetryCount++;
+        if (wifiRetryCount >= WIFI_MAX_RETRIES) {
+          console.error('[WiFi] Max port retries reached, giving up');
+          resolve({ success: false, error: 'All ports in use, unable to start server' });
+          return;
+        }
+        const oldServer = wifiServer;
+        wifiServer = null;
         wifiPort++;
-        wifiServer.close();
+        oldServer.close();
         resolve(startWifiServer());
       } else {
         resolve({ success: false, error: err.message });
@@ -1765,6 +2036,7 @@ function stopWifiServer() {
     wifiServer.close(() => {
       wifiActive = false;
       wifiServer = null;
+      wifiRateLimitMap.clear(); // Reset rate limits on stop
       console.log('[WiFi] Server stopped');
       resolve({ success: true });
     });
@@ -1780,14 +2052,34 @@ ipcMain.handle('start-wifi-server', async () => {
 });
 
 ipcMain.handle('set-wifi-shared-dir', (_event, dirPath) => {
-  wifiSharedDir = dirPath;
-  // Ensure the directory exists
-  try {
-    fs.mkdirSync(wifiSharedDir, { recursive: true });
-  } catch (err) {
-    console.error('[WiFi] Shared dir creation failed:', err.message);
+  if (!dirPath || typeof dirPath !== 'string') {
+    return { success: false, error: 'Directory path must be a valid string' };
   }
-  return { success: true, sharedDir: wifiSharedDir };
+
+  // Resolve to canonical absolute path
+  const resolved = path.resolve(dirPath);
+
+  // Prevent system root or critical OS paths
+  const blockedPaths = ['/', '/System', '/bin', '/sbin', '/usr', '/etc', '/var', '/private'];
+  if (blockedPaths.includes(resolved)) {
+    return { success: false, error: 'System root directories cannot be set as the shared folder' };
+  }
+
+  // Restrict to user home directory or mounted volumes
+  const homeDir = os.homedir();
+  if (!resolved.startsWith(homeDir) && !resolved.startsWith('/Volumes')) {
+    return { success: false, error: 'Shared directory must be inside user home directory or external volume' };
+  }
+
+  // Ensure directory exists & store canonical realpath
+  try {
+    fs.mkdirSync(resolved, { recursive: true });
+    wifiSharedDir = fs.realpathSync(resolved);
+    return { success: true, sharedDir: wifiSharedDir };
+  } catch (err) {
+    console.error('[WiFi] Shared dir creation/validation failed:', err.message);
+    return { success: false, error: err.message };
+  }
 });
 
 ipcMain.handle('stop-wifi-server', async () => {
@@ -1811,57 +2103,82 @@ ipcMain.handle('open-wifi-shared-dir', () => {
 });
 
 ipcMain.handle('open-file-path', (_event, filePath) => {
-  if (filePath && fs.existsSync(filePath)) {
-    shell.openPath(filePath);
+  if (!filePath || !fs.existsSync(filePath)) return false;
+  const resolvedPath = path.resolve(filePath);
+  if (isPathAllowed(resolvedPath)) {
+    shell.openPath(resolvedPath);
     return true;
   }
+  console.warn(`[IPC] open-file-path denied: ${resolvedPath}`);
   return false;
 });
 
 ipcMain.handle('get-file-thumbnail', async (_event, fileName) => {
   if (!fileName || !wifiSharedDir) return null;
   try {
-    const filePath = path.join(wifiSharedDir, fileName);
+    const filePath = path.resolve(wifiSharedDir, fileName);
+    if (!isWifiPathAllowed(filePath)) {
+      console.warn(`[WiFi] Thumbnail denied: ${filePath}`);
+      return null;
+    }
     if (!fs.existsSync(filePath)) return null;
     
     const stat = fs.statSync(filePath);
     if (!stat || stat.size === 0) return null;
 
     const ext = path.extname(filePath).toLowerCase().replace('.', '');
+    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
     const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
 
+    // 1. For images, return direct Base64 Data URL (100% reliable)
+    if (imageExts.includes(ext)) {
+      try {
+        const mimeType = ext === 'png' ? 'image/png' : (ext === 'svg' ? 'image/svg+xml' : (ext === 'gif' ? 'image/gif' : 'image/jpeg'));
+        const imgData = fs.readFileSync(filePath);
+        return `data:${mimeType};base64,${imgData.toString('base64')}`;
+      } catch (e) {}
+    }
+
+    // 2. For videos, extract video frame via qlmanage or ffmpeg
     if (videoExts.includes(ext)) {
       const tmpDir = os.tmpdir();
-      const tmpThumb = path.join(tmpDir, `${fileName}.png`);
+      const possibleThumbPaths = [
+        path.join(tmpDir, `${fileName}.png`),
+        path.join(tmpDir, `${path.basename(filePath)}.png`),
+      ];
 
-      // 1. Try macOS built-in qlmanage for video frame thumbnail
+      // Try qlmanage first
       try {
         await new Promise((resolve) => {
-          execFile('qlmanage', ['-t', '-s', '256', '-o', tmpDir, filePath], { timeout: 3000 }, resolve);
+          execFile('qlmanage', ['-t', '-s', '256', '-o', tmpDir, filePath], { timeout: 4000 }, resolve);
         });
 
-        if (fs.existsSync(tmpThumb)) {
-          const imgData = fs.readFileSync(tmpThumb);
-          try { fs.unlinkSync(tmpThumb); } catch(e) {}
-          return `data:image/png;base64,${imgData.toString('base64')}`;
+        for (const tp of possibleThumbPaths) {
+          if (fs.existsSync(tp)) {
+            const imgData = fs.readFileSync(tp);
+            try { fs.unlinkSync(tp); } catch(e) {}
+            return `data:image/png;base64,${imgData.toString('base64')}`;
+          }
         }
       } catch (err) {}
 
-      // 2. Try ffmpeg fallback
+      // Try ffmpeg fallback
       try {
         const ffmpegPath = fs.existsSync('/opt/homebrew/bin/ffmpeg') ? '/opt/homebrew/bin/ffmpeg' : (fs.existsSync('/usr/local/bin/ffmpeg') ? '/usr/local/bin/ffmpeg' : 'ffmpeg');
+        const outThumb = possibleThumbPaths[0];
         await new Promise((resolve) => {
-          execFile(ffmpegPath, ['-ss', '00:00:00.5', '-i', filePath, '-vframes', '1', '-s', '256x256', tmpThumb, '-y'], { timeout: 3000 }, resolve);
+          execFile(ffmpegPath, ['-ss', '00:00:00.5', '-i', filePath, '-vframes', '1', '-s', '256x256', outThumb, '-y'], { timeout: 4000 }, resolve);
         });
 
-        if (fs.existsSync(tmpThumb)) {
-          const imgData = fs.readFileSync(tmpThumb);
-          try { fs.unlinkSync(tmpThumb); } catch(e) {}
+        if (fs.existsSync(outThumb)) {
+          const imgData = fs.readFileSync(outThumb);
+          try { fs.unlinkSync(outThumb); } catch(e) {}
           return `data:image/png;base64,${imgData.toString('base64')}`;
         }
       } catch (err) {}
     }
 
+    // 3. Native macOS thumbnail generator fallback
     if (nativeImage && nativeImage.createThumbnailFromPath) {
       const image = await nativeImage.createThumbnailFromPath(filePath, { width: 128, height: 128 });
       if (image && !image.isEmpty()) {
@@ -1877,7 +2194,11 @@ ipcMain.handle('get-file-thumbnail', async (_event, fileName) => {
 ipcMain.handle('get-file-data-url', async (_event, fileName) => {
   if (!fileName || !wifiSharedDir) return null;
   try {
-    const filePath = path.join(wifiSharedDir, fileName);
+    const filePath = path.resolve(wifiSharedDir, fileName);
+    if (!isWifiPathAllowed(filePath)) {
+      console.warn(`[WiFi] Data URL denied: ${filePath}`);
+      return null;
+    }
     if (!fs.existsSync(filePath)) return null;
 
     const ext = path.extname(filePath).toLowerCase().replace('.', '');
@@ -1894,6 +2215,128 @@ ipcMain.handle('get-file-data-url', async (_event, fileName) => {
     }
   } catch (err) {
     console.error('[WiFi] Data URL error:', err.message || err);
+  }
+  return null;
+});
+
+// ─── Local File Thumbnail IPC ───────────────────────────────────────────────
+ipcMain.handle('get-local-thumbnail', async (_event, filePath) => {
+  if (!filePath) return null;
+  try {
+    const resolvedPath = path.resolve(filePath);
+    if (!isPathAllowed(resolvedPath) || !fs.existsSync(resolvedPath)) return null;
+
+    // 1. Try macOS native QuickLook thumbnail API (instant C++ thread rendering)
+    if (nativeImage && nativeImage.createThumbnailFromPath) {
+      try {
+        const image = await nativeImage.createThumbnailFromPath(resolvedPath, { width: 96, height: 96 });
+        if (image && !image.isEmpty()) {
+          return image.toDataURL();
+        }
+      } catch (e) {}
+    }
+
+    // 2. Fallback for small images (< 2MB only)
+    const stat = fs.statSync(resolvedPath);
+    if (stat && !stat.isDirectory() && stat.size > 0 && stat.size < 2 * 1024 * 1024) {
+      const ext = path.extname(resolvedPath).toLowerCase().replace('.', '');
+      const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
+      if (imageExts.includes(ext)) {
+        try {
+          const mime = ext === 'png' ? 'image/png' : (ext === 'svg' ? 'image/svg+xml' : (ext === 'gif' ? 'image/gif' : 'image/jpeg'));
+          const imgData = fs.readFileSync(resolvedPath);
+          return `data:${mime};base64,${imgData.toString('base64')}`;
+        } catch (e) {}
+      }
+    }
+  } catch (err) {
+    console.error('[Thumbnail] Local error:', err.message || err);
+  }
+  return null;
+});
+
+// ─── Remote Android File Thumbnail IPC ──────────────────────────────────────
+ipcMain.handle('get-remote-thumbnail', async (_event, { deviceId, remotePath }) => {
+  if (!deviceId || !remotePath) return null;
+  try {
+    const ext = path.extname(remotePath).toLowerCase().replace('.', '');
+    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+    const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+
+    if (!imageExts.includes(ext) && !videoExts.includes(ext)) return null;
+
+    const adbPath = await findAdb();
+    if (!adbPath) return null;
+
+    if (imageExts.includes(ext)) {
+      const buffer = await new Promise((resolve) => {
+        const proc = spawn(adbPath, ['-s', deviceId, 'exec-out', 'cat', remotePath]);
+        const chunks = [];
+        let totalLen = 0;
+        proc.stdout.on('data', (chunk) => {
+          chunks.push(chunk);
+          totalLen += chunk.length;
+        });
+        proc.on('close', (code) => {
+          if (code === 0 && totalLen > 0) resolve(Buffer.concat(chunks, totalLen));
+          else resolve(null);
+        });
+        proc.on('error', () => resolve(null));
+      });
+
+      if (buffer && buffer.length > 0) {
+        const mime = ext === 'png' ? 'image/png' : (ext === 'webp' ? 'image/webp' : (ext === 'gif' ? 'image/gif' : 'image/jpeg'));
+        return `data:${mime};base64,${buffer.toString('base64')}`;
+      }
+    }
+
+    if (videoExts.includes(ext)) {
+      const tmpDir = path.join(os.tmpdir(), 'droidbridge-thumbs');
+      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+      const safeBaseName = path.basename(remotePath).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const localTmpFile = path.join(tmpDir, `remotethumb-${Date.now()}-${safeBaseName}`);
+
+      await runAdb(['-s', deviceId, 'pull', remotePath, localTmpFile]);
+      if (fs.existsSync(localTmpFile)) {
+        const tmpThumb = path.join(tmpDir, `frame-${Date.now()}.png`);
+        const ffmpegPath = fs.existsSync('/opt/homebrew/bin/ffmpeg') ? '/opt/homebrew/bin/ffmpeg' : (fs.existsSync('/usr/local/bin/ffmpeg') ? '/usr/local/bin/ffmpeg' : 'ffmpeg');
+        
+        await new Promise((resolve) => {
+          execFile(ffmpegPath, ['-ss', '00:00:00.5', '-i', localTmpFile, '-vframes', '1', '-s', '128x128', tmpThumb, '-y'], { timeout: 4000 }, resolve);
+        });
+
+        try { fs.unlinkSync(localTmpFile); } catch(e) {}
+
+        if (fs.existsSync(tmpThumb)) {
+          const imgData = fs.readFileSync(tmpThumb);
+          try { fs.unlinkSync(tmpThumb); } catch(e) {}
+          return `data:image/png;base64,${imgData.toString('base64')}`;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Thumbnail] Remote error:', err.message || err);
+  }
+  return null;
+});
+
+// ─── Fetch Remote File for Preview IPC ──────────────────────────────────────
+ipcMain.handle('fetch-remote-preview', async (_event, { deviceId, remotePath }) => {
+  if (!deviceId || !remotePath) return null;
+  try {
+    const tmpDir = path.join(os.tmpdir(), 'droidbridge-previews');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+    const safeName = path.basename(remotePath).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const localPreviewPath = path.join(tmpDir, `preview-${Date.now()}-${safeName}`);
+
+    await runAdb(['-s', deviceId, 'pull', remotePath, localPreviewPath]);
+    if (fs.existsSync(localPreviewPath)) {
+      return localPreviewPath;
+    }
+  } catch (err) {
+    console.error('[Preview] Remote fetch error:', err.message || err);
   }
   return null;
 });
@@ -1998,6 +2441,18 @@ app.whenReady().then(() => {
   createWindow();
   setAppMenu();
   startDeviceDetection();
+
+  // Gracefully stop Wi-Fi server on app quit
+  app.on('before-quit', async () => {
+    if (wifiActive) {
+      await stopWifiServer();
+    }
+    if (devicePollInterval) {
+      clearInterval(devicePollInterval);
+      devicePollInterval = null;
+    }
+  });
+
   console.log('[Main] DroidBridge ready');
 });
 
