@@ -28,6 +28,9 @@ We are excited to release **DroidBridge v1.1.0**, a major version release packed
 * **Bulk File Management**: You can now select multiple files or folders using checkboxes (or standard Shift/Cmd click modifiers) and perform bulk actions.
 * **Recursive Multi-Delete**: Added a new **Delete** command to remove all selected items in one click. It recursively clears directories and single files safely with safety warnings.
 
+### 📖 Comprehensive Project Documentation
+* **Technical Guide Included**: The release now contains a detailed `DOCUMENTATION.md` file explaining the project's folder structure, Electron architecture (Main/Renderer/IPC), security design, and step-by-step creation/compilation guides.
+
 ---
 
 ## 🛡️ Security Hardening
@@ -45,4 +48,20 @@ We are excited to release **DroidBridge v1.1.0**, a major version release packed
 * **Scrollbar Gutter Lock**: Configured a persistent vertical scrollbar track (`overflow-y: scroll;`) and adjusted header padding dynamically to prevent shifting content columns when browsing between populated and empty folders.
 
 ---
+
+###  Note for macOS Users
+
+If you get a warning saying the app "is damaged and can't be opened", this is a standard macOS warning for unsigned apps. To open it:
+
+Open your Terminal app.
+Run the following command:
+
+```bash
+xattr -cr /path/to/DroidBridge.app
+```
+
+(Tip: Type xattr -cr and drag DroidBridge.app into the terminal to auto-fill the path!)
+
+---
+
 *Download the update to enjoy the most secure, feature-rich DroidBridge yet!*
