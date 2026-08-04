@@ -1,3 +1,37 @@
+# Release Notes - DroidBridge v1.1.1 (Security Hardening Release)
+
+We are excited to release **DroidBridge v1.1.1**, a critical security patch release addressing findings identified in our security audit. This version hardens the Wi-Fi sharing server and local file processing pipelines.
+
+---
+
+## 🛡️ Security Hardening & Vulnerability Fixes
+
+### 🔑 Wi-Fi Sharing Token Authentication (F1)
+* **Session Access Token**: The Wi-Fi share server now generates a cryptographically secure 128-bit access token (`wifiToken`) on startup.
+* **Auto-Login via QR Code**: Scanning the QR code automatically logs the device in.
+* **Manual Login Interface**: Users manually entering the URL will be prompted with a new security login screen to enter the token displayed on the Mac desktop window.
+* **Secure Cookie Session**: Authenticated sessions are tracked via a secure, `HttpOnly`, `SameSite=Strict` cookie (`sid`).
+
+### 🚧 Strict Boundary Containment (F2 & F3)
+* **Restricted Local Allowlist**: Removed the root directory (`/`) from `ALLOWED_LOCAL_DIRS` and added `/Volumes` to restrict local browsing to safe, user-approved directories.
+* **Prefix Bypass Guard**: Patched both `isPathAllowed` and `isWifiPathAllowed` path checks to enforce strict path boundary parsing, preventing attackers from accessing sibling folders.
+
+### 💉 Command Injection Sanitization (F4)
+* **Adb Shell Escaping**: Applied shell argument escaping using `escapeShellArg` for the remote file path inside the video frame thumbnail generation module.
+
+### 💾 Upload Size Protection (F5)
+* **Disk DoS Limit**: Imposed a strict 100 GB upload size limit per file. Incoming requests are verified against `Content-Length` headers, and data streams are monitored dynamically to abort and clean up uploads exceeding the ceiling.
+
+### 🌐 Origin XSS Shield (F6)
+* **Restricted Preview Types**: Limited the `inline=1` rendering option to a safe allowlist of preview files (`pdf`, `txt`, `json`, and common images/videos/audio).
+* **Forced Attachment Download**: Any other formats (including `.html` and `.svg`) are now forced to download as attachments, preventing cross-site scripting (XSS) execution inside the server origin.
+
+### 🧼 Rate-Limit Cleanup & Temp Directory Isolation (F8 & F9)
+* **Rate-Limit Memory Pruning**: A periodic cleanup interval runs every 5 minutes to sweep and prune inactive IP addresses from memory, preventing slow memory leaks.
+* **Secure Temp Permissions**: Temp folders and pulled preview frames are named using secure random suffixes and initialized with strict folder permissions (`0o700`), locking out other local users.
+
+---
+
 # Release Notes - DroidBridge v1.1.0 (Major Release)
 
 We are excited to release **DroidBridge v1.1.0**, a major version release packed with new capabilities, visual layout improvements, security enhancements, and robust adb connection logic.

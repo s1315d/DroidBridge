@@ -2165,7 +2165,7 @@ async function startWifiServer() {
         }
 
         const totalSize = parseInt(req.headers['content-length'] || '0', 10);
-        const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+        const MAX_UPLOAD_SIZE = 100 * 1024 * 1024 * 1024; // 100 GB
         if (totalSize > MAX_UPLOAD_SIZE) {
           res.writeHead(413, { 'Content-Type': 'text/plain' });
           res.end('File too large');
