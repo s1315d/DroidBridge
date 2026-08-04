@@ -2097,7 +2097,7 @@ function setupGlobalHandlers() {
           const sharedPath = document.getElementById('wifi-shared-path');
 
           if (qrImg) qrImg.src = result.qrCode;
-          if (urlInput) urlInput.value = `http://${result.ip}:${result.port}`;
+          if (urlInput) urlInput.value = `http://${result.ip}:${result.port}/?token=${result.token}`;
           if (sharedPath) {
             sharedPath.textContent = result.sharedDir;
             sharedPath.title = result.sharedDir;

@@ -80,7 +80,7 @@ const ALLOWED_LOCAL_DIRS = [
   path.join(os.homedir(), 'Desktop'),
   path.join(os.homedir(), 'Documents'),
   path.join(os.homedir(), 'Downloads'),
-  '/',
+  path.join('/', 'Volumes'),
 ];
 
 /**
@@ -90,11 +90,12 @@ const ALLOWED_LOCAL_DIRS = [
  */
 function isPathAllowed(resolvedPath) {
   // Always allow temp dir (for cleanupDir)
-  const tmpDir = os.tmpdir();
-  if (resolvedPath.startsWith(path.resolve(tmpDir))) return true;
+  const tmpDir = path.resolve(os.tmpdir());
+  if (resolvedPath === tmpDir || resolvedPath.startsWith(tmpDir + path.sep)) return true;
   // Check allowed local dirs
   for (const dir of ALLOWED_LOCAL_DIRS) {
-    if (resolvedPath.startsWith(dir)) return true;
+    const resolvedDir = path.resolve(dir);
+    if (resolvedPath === resolvedDir || resolvedPath.startsWith(resolvedDir + path.sep)) return true;
   }
   return false;
 }
@@ -955,8 +956,9 @@ ipcMain.handle('open-in-finder', (_event, filePath) => {
 
 // 15. Create a temporary transfer directory on Mac
 ipcMain.handle('get-temp-dir', () => {
-  const tempPath = path.join(os.tmpdir(), `droidbridge-temp-${Date.now()}`);
-  fs.mkdirSync(tempPath, { recursive: true });
+  const randomSuffix = crypto.randomBytes(16).toString('hex');
+  const tempPath = path.join(os.tmpdir(), `droidbridge-temp-${randomSuffix}`);
+  fs.mkdirSync(tempPath, { recursive: true, mode: 0o700 });
   return tempPath;
 });
 
@@ -994,6 +996,8 @@ let wifiPort = 8080;
 let wifiActive = false;
 let wifiQrDataUrl = '';
 let wifiRateLimitMap = new Map(); // IP -> request count for basic rate limiting
+let wifiToken = ''; // Session access token for Wi-Fi authentication (F1)
+let wifiCleanupTimer = null; // Pruning timer for rate limit map memory leak (F8)
 
 /**
  * Check if a path is within the allowed Wi-Fi shared directory (resolves symlinks).
@@ -1008,7 +1012,7 @@ function isWifiPathAllowed(targetPath) {
     }
     const resolvedTargetReal = fs.realpathSync(dir);
     const resolvedShare = fs.realpathSync(wifiSharedDir);
-    return resolvedTargetReal.startsWith(resolvedShare);
+    return resolvedTargetReal === resolvedShare || resolvedTargetReal.startsWith(resolvedShare + path.sep);
   } catch {
     return false;
   }
@@ -1025,6 +1029,18 @@ function getLocalIpAddress() {
     }
   }
   return '127.0.0.1';
+}
+
+function getCookie(req, name) {
+  const list = {};
+  const rc = req.headers.cookie;
+  if (rc) {
+    rc.split(';').forEach((cookie) => {
+      const parts = cookie.split('=');
+      list[parts.shift().trim()] = decodeURIComponent(parts.join('='));
+    });
+  }
+  return list[name];
 }
 
 // Mobile Web UI template
@@ -1771,6 +1787,121 @@ function getMobileHtml(nonce = '') {
 `;
 }
 
+function getLoginHtml(errorMsg = '', nonce = '') {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DroidBridge Wi-Fi Share Login</title>
+  <style nonce="${nonce}">
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: #08080c;
+      color: #e2e2e9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .login-container {
+      background-color: #111119;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 32px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      text-align: center;
+    }
+    h2 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+    p {
+      font-size: 13px;
+      color: #8888a0;
+      margin-bottom: 24px;
+      line-height: 1.5;
+    }
+    .input-group {
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #5f5f7a;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+    input[type="text"] {
+      width: 100%;
+      background-color: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    input[type="text"]:focus {
+      border-color: #6c5ce7;
+      box-shadow: 0 0 0 2px rgba(108, 92, 231, 0.2);
+    }
+    button {
+      width: 100%;
+      background-color: #6c5ce7;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.2s, transform 0.1s;
+    }
+    button:hover {
+      background-color: #5b4cc4;
+    }
+    button:active {
+      transform: scale(0.98);
+    }
+    .error-msg {
+      color: #ff6b6b;
+      font-size: 13px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <h2>DroidBridge Wi-Fi Share</h2>
+    <p>Please enter the Wi-Fi Share Access Token shown on the Mac application screen to connect.</p>
+    <form method="POST" action="/login">
+      <div class="input-group">
+        <label for="token-input">Access Token</label>
+        <input type="text" id="token-input" name="token" placeholder="Enter Token" required autocomplete="off" />
+      </div>
+      <button type="submit">Access Files</button>
+    </form>
+    ${errorMsg ? `<div class="error-msg">${errorMsg}</div>` : ''}
+  </div>
+</body>
+</html>`;
+}
+
 // Start Wi-Fi Server
 let wifiRetryCount = 0;
 const WIFI_MAX_RETRIES = 20;
@@ -1783,7 +1914,8 @@ async function startWifiServer() {
       port: wifiPort,
       ip: getLocalIpAddress(),
       qrCode: wifiQrDataUrl,
-      sharedDir: wifiSharedDir
+      sharedDir: wifiSharedDir,
+      token: wifiToken
     };
   }
 
@@ -1794,8 +1926,21 @@ async function startWifiServer() {
     console.error('[WiFi] Shared dir creation failed:', err.message);
   }
 
+  // Generate dynamic cryptographically secure access token for Wi-Fi Sharing (F1)
+  wifiToken = crypto.randomBytes(16).toString('hex');
+
+  // Start periodic cleanup of the rate-limit map to prevent memory leak (F8)
+  wifiCleanupTimer = setInterval(() => {
+    const cutoff = Date.now() - 5 * 60000;
+    for (const [ip, entry] of wifiRateLimitMap.entries()) {
+      if (entry.windowStart < cutoff) {
+        wifiRateLimitMap.delete(ip);
+      }
+    }
+  }, 5 * 60000);
+
   const localIp = getLocalIpAddress();
-  const url = `http://${localIp}:${wifiPort}`;
+  const url = `http://${localIp}:${wifiPort}/?token=${wifiToken}`;
 
   // Generate QR Code
   try {
@@ -1808,17 +1953,6 @@ async function startWifiServer() {
   return new Promise((resolve) => {
     wifiServer = http.createServer((req, res) => {
       const reqUrl = new URL(req.url, `http://${req.headers.host}`);
-      
-      // Serve Mobile UI
-      if (reqUrl.pathname === '/' && req.method === 'GET') {
-        const nonce = crypto.randomBytes(16).toString('hex');
-        res.writeHead(200, {
-          'Content-Type': 'text/html',
-          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:;`
-        });
-        res.end(getMobileHtml(nonce));
-        return;
-      }
 
       // Simple rate limiting: 120 requests per minute per IP
       const clientIp = req.socket.remoteAddress;
@@ -1839,6 +1973,72 @@ async function startWifiServer() {
             return;
           }
         }
+      }
+
+      // Handle Login POST
+      if (reqUrl.pathname === '/login' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+          const params = new URLSearchParams(body);
+          const submittedToken = params.get('token');
+          if (submittedToken === wifiToken) {
+            res.writeHead(302, {
+              'Set-Cookie': `sid=${wifiToken}; Path=/; HttpOnly; SameSite=Strict`,
+              'Location': '/'
+            });
+            res.end();
+          } else {
+            const nonce = crypto.randomBytes(16).toString('hex');
+            res.writeHead(200, {
+              'Content-Type': 'text/html',
+              'Content-Security-Policy': `default-src 'self'; style-src 'self' 'nonce-${nonce}';`
+            });
+            res.end(getLoginHtml('Invalid token, please try again.', nonce));
+          }
+        });
+        return;
+      }
+
+      // Validate Authentication (F1)
+      const queryToken = reqUrl.searchParams.get('token');
+      const cookieToken = getCookie(req, 'sid');
+      const isAuthenticated = (queryToken === wifiToken) || (cookieToken === wifiToken);
+
+      // Auto-set cookie and redirect to clean URL if token is passed via query
+      if (queryToken === wifiToken && cookieToken !== wifiToken) {
+        res.writeHead(302, {
+          'Set-Cookie': `sid=${wifiToken}; Path=/; HttpOnly; SameSite=Strict`,
+          'Location': '/'
+        });
+        res.end();
+        return;
+      }
+
+      if (!isAuthenticated) {
+        if (reqUrl.pathname === '/' && req.method === 'GET') {
+          const nonce = crypto.randomBytes(16).toString('hex');
+          res.writeHead(200, {
+            'Content-Type': 'text/html',
+            'Content-Security-Policy': `default-src 'self'; style-src 'self' 'nonce-${nonce}';`
+          });
+          res.end(getLoginHtml('', nonce));
+        } else {
+          res.writeHead(401, { 'Content-Type': 'text/plain' });
+          res.end('Unauthorized');
+        }
+        return;
+      }
+
+      // Serve Mobile UI
+      if (reqUrl.pathname === '/' && req.method === 'GET') {
+        const nonce = crypto.randomBytes(16).toString('hex');
+        res.writeHead(200, {
+          'Content-Type': 'text/html',
+          'Content-Security-Policy': `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:;`
+        });
+        res.end(getMobileHtml(nonce));
+        return;
       }
 
       // Serve JSON list of shared files
@@ -1898,14 +2098,19 @@ async function startWifiServer() {
 
         const ext = path.extname(filePath).toLowerCase().replace('.', '');
         const mimeTypes = {
-          jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+          jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
           mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', avi: 'video/x-msvideo', m4v: 'video/x-m4v', '3gp': 'video/3gpp',
           mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', m4a: 'audio/mp4', ogg: 'audio/ogg',
-          pdf: 'application/pdf', txt: 'text/plain; charset=utf-8', html: 'text/html', json: 'application/json'
+          pdf: 'application/pdf', txt: 'text/plain; charset=utf-8', json: 'application/json'
         };
 
         const contentType = mimeTypes[ext] || 'application/octet-stream';
-        const isInline = reqUrl.searchParams.get('inline') === '1';
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+        const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+        const audioExts = ['mp3', 'wav', 'flac', 'm4a', 'ogg'];
+        const docExts = ['pdf', 'txt', 'json'];
+        const allowedInlineExts = [...imageExts, ...videoExts, ...audioExts, ...docExts];
+        const isInline = reqUrl.searchParams.get('inline') === '1' && allowedInlineExts.includes(ext);
 
         const range = req.headers.range;
         if (range) {
@@ -1959,6 +2164,14 @@ async function startWifiServer() {
           return;
         }
 
+        const totalSize = parseInt(req.headers['content-length'] || '0', 10);
+        const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+        if (totalSize > MAX_UPLOAD_SIZE) {
+          res.writeHead(413, { 'Content-Type': 'text/plain' });
+          res.end('File too large');
+          return;
+        }
+
         // Ensure parent directories exist
         const parentDir = path.dirname(filePath);
         try {
@@ -1968,11 +2181,18 @@ async function startWifiServer() {
         }
         
         const writeStream = fs.createWriteStream(filePath);
-        const totalSize = parseInt(req.headers['content-length'] || '0', 10);
         let uploadedSize = 0;
+        let limitExceeded = false;
 
         req.on('data', (chunk) => {
           uploadedSize += chunk.length;
+          if (uploadedSize > MAX_UPLOAD_SIZE) {
+            limitExceeded = true;
+            writeStream.destroy();
+            req.destroy(); // Abort request
+            fs.unlink(filePath, () => {});
+            return;
+          }
           if (win && totalSize > 0) {
             const percent = Math.round((uploadedSize / totalSize) * 100);
             win.webContents.send('wifi-upload-progress', { fileName, percent });
@@ -1982,6 +2202,7 @@ async function startWifiServer() {
         req.pipe(writeStream);
 
         writeStream.on('finish', () => {
+          if (limitExceeded) return;
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true }));
           // Notify desktop UI to refresh listing
@@ -1991,6 +2212,7 @@ async function startWifiServer() {
         });
 
         writeStream.on('error', (err) => {
+          if (limitExceeded) return;
           console.error('[WiFi] Upload write error:', err.message);
           res.writeHead(500, { 'Content-Type': 'text/plain' });
           res.end(err.message);
@@ -2032,6 +2254,11 @@ async function startWifiServer() {
 
 function stopWifiServer() {
   if (!wifiActive || !wifiServer) return { success: true };
+  if (wifiCleanupTimer) {
+    clearInterval(wifiCleanupTimer);
+    wifiCleanupTimer = null;
+  }
+  wifiToken = '';
   return new Promise((resolve) => {
     wifiServer.close(() => {
       wifiActive = false;
@@ -2270,7 +2497,7 @@ ipcMain.handle('get-remote-thumbnail', async (_event, { deviceId, remotePath }) 
 
     if (imageExts.includes(ext)) {
       const buffer = await new Promise((resolve) => {
-        const proc = spawn(adbPath, ['-s', deviceId, 'exec-out', 'cat', remotePath]);
+        const proc = spawn(adbPath, ['-s', deviceId, 'exec-out', 'cat', escapeShellArg(remotePath)]);
         const chunks = [];
         let totalLen = 0;
         proc.stdout.on('data', (chunk) => {
@@ -2292,14 +2519,15 @@ ipcMain.handle('get-remote-thumbnail', async (_event, { deviceId, remotePath }) 
 
     if (videoExts.includes(ext)) {
       const tmpDir = path.join(os.tmpdir(), 'droidbridge-thumbs');
-      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
 
       const safeBaseName = path.basename(remotePath).replace(/[^a-zA-Z0-9._-]/g, '_');
-      const localTmpFile = path.join(tmpDir, `remotethumb-${Date.now()}-${safeBaseName}`);
+      const randomSuffix = crypto.randomBytes(16).toString('hex');
+      const localTmpFile = path.join(tmpDir, `remotethumb-${randomSuffix}-${safeBaseName}`);
 
       await runAdb(['-s', deviceId, 'pull', remotePath, localTmpFile]);
       if (fs.existsSync(localTmpFile)) {
-        const tmpThumb = path.join(tmpDir, `frame-${Date.now()}.png`);
+        const tmpThumb = path.join(tmpDir, `frame-${randomSuffix}.png`);
         const ffmpegPath = fs.existsSync('/opt/homebrew/bin/ffmpeg') ? '/opt/homebrew/bin/ffmpeg' : (fs.existsSync('/usr/local/bin/ffmpeg') ? '/usr/local/bin/ffmpeg' : 'ffmpeg');
         
         await new Promise((resolve) => {
@@ -2326,10 +2554,11 @@ ipcMain.handle('fetch-remote-preview', async (_event, { deviceId, remotePath }) 
   if (!deviceId || !remotePath) return null;
   try {
     const tmpDir = path.join(os.tmpdir(), 'droidbridge-previews');
-    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
 
     const safeName = path.basename(remotePath).replace(/[^a-zA-Z0-9._-]/g, '_');
-    const localPreviewPath = path.join(tmpDir, `preview-${Date.now()}-${safeName}`);
+    const randomSuffix = crypto.randomBytes(16).toString('hex');
+    const localPreviewPath = path.join(tmpDir, `preview-${randomSuffix}-${safeName}`);
 
     await runAdb(['-s', deviceId, 'pull', remotePath, localPreviewPath]);
     if (fs.existsSync(localPreviewPath)) {
