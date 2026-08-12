@@ -10,6 +10,11 @@ const os = require('os');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 
+// ─── Module imports (#21) ───────────────────────────────────────────────────
+const security = require('./src/security');
+const adb = require('./src/adb');
+const settingsMod = require('./src/settings');
+
 // Prevent EPIPE uncaught exception crashes when stdout/stderr pipes close
 if (process.stdout && process.stdout.on) {
   process.stdout.on('error', () => {});
@@ -70,182 +75,46 @@ if (app.setName) app.setName('DroidBridge');
 // ─── Globals ─────────────────────────────────────────────────────────────────
 
 let win = null;
-let cachedAdbPath = undefined;       // undefined = not yet searched, null = not found
 let knownDeviceIds = new Set();      // Track connected devices for change detection
 let devicePollInterval = null;
 
-// ─── Allowed directories for local file browsing ────────────────────────────
-const ALLOWED_LOCAL_DIRS = [
-  os.homedir(),
-  path.join(os.homedir(), 'Desktop'),
-  path.join(os.homedir(), 'Documents'),
-  path.join(os.homedir(), 'Downloads'),
-  path.join('/', 'Volumes'),
-];
+// Cancellation control for in-progress file transfers.
+let transferCancelled = false;      // Set true by the `cancel-transfer` IPC
+let currentTransferProc = null;     // Active adb spawn, killed on cancel
 
-/**
- * Check if a resolved path is within allowed directories.
- * @param {string} resolvedPath  An already-resolved absolute path
- * @returns {boolean}
- */
-function isPathAllowed(resolvedPath) {
-  // Always allow temp dir (for cleanupDir)
-  const tmpDir = path.resolve(os.tmpdir());
-  if (resolvedPath === tmpDir || resolvedPath.startsWith(tmpDir + path.sep)) return true;
-  // Check allowed local dirs
-  for (const dir of ALLOWED_LOCAL_DIRS) {
-    const resolvedDir = path.resolve(dir);
-    if (resolvedPath === resolvedDir || resolvedPath.startsWith(resolvedDir + path.sep)) return true;
-  }
-  return false;
+// Pause/resume control for in-progress file transfers.
+let transferPaused = false;         // Set true by `pause-transfer`, false by `resume-transfer`
+
+// ─── Aliases for module functions (#21) ─────────────────────────────────────
+// Security & path validation (from src/security.js)
+const isPathAllowed = security.isPathAllowed;
+const getCookie = security.getCookie;
+const tokenEquals = security.tokenEquals;
+// isWifiPathAllowed needs the current wifiSharedDir, so wrap it:
+function isWifiPathAllowed(targetPath) {
+  return security.isWifiPathAllowed(targetPath, wifiSharedDir);
 }
 
-// ─── ADB Helper Functions ────────────────────────────────────────────────────
+// ADB helpers (from src/adb.js)
+const findAdb = adb.findAdb;
+const escapeShellArg = adb.escapeShellArg;
+const runAdb = adb.runAdb;
+const parseAdbLsOutput = adb.parseAdbLsOutput;
+const getRemoteParent = adb.getRemoteParent;
+const getRemoteRelative = adb.getRemoteRelative;
+const remoteFileExists = adb.remoteFileExists;
+const getRemoteFilesRecursive = adb.getRemoteFilesRecursive;
 
-/**
- * Locate the adb binary on the system.
- * Searches common macOS paths then falls back to `which adb`.
- * Caches the result so subsequent calls are instant.
- * @returns {Promise<string|null>} Resolved path or null
- */
-async function findAdb() {
-  // Return cached result if we've already searched
-  if (cachedAdbPath !== undefined) return cachedAdbPath;
+// Settings & history (from src/settings.js — wrappers pass `app`)
+function loadSettings() { return settingsMod.loadSettings(app); }
+function saveSettings(settings) { return settingsMod.saveSettings(app, settings); }
+function loadHistory() { return settingsMod.loadHistory(app); }
+function saveHistory(history) { return settingsMod.saveHistory(app, history); }
+function addHistoryEntry(entry) { return settingsMod.addHistoryEntry(app, entry); }
 
-  const commonPaths = [
-    '/usr/local/bin/adb',
-    '/opt/homebrew/bin/adb',
-    `${os.homedir()}/Library/Android/sdk/platform-tools/adb`,
-  ];
-
-  // Check well-known locations first
-  for (const candidate of commonPaths) {
-    try {
-      await fs.promises.access(candidate, fs.constants.X_OK);
-      console.log(`[ADB] Found at: ${candidate}`);
-      cachedAdbPath = candidate;
-      return cachedAdbPath;
-    } catch {
-      // Not found at this path, continue
-    }
-  }
-
-  // Fall back to `which adb`
-  try {
-    const result = await new Promise((resolve, reject) => {
-      execFile('/usr/bin/which', ['adb'], (err, stdout) => {
-        if (err) return reject(err);
-        resolve(stdout.trim());
-      });
-    });
-    if (result) {
-      console.log(`[ADB] Found via which: ${result}`);
-      cachedAdbPath = result;
-      return cachedAdbPath;
-    }
-  } catch {
-    // which failed — adb is not on PATH
-  }
-
-  console.warn('[ADB] Not found on this system');
-  cachedAdbPath = null;
-  return null;
-}
-
-/**
- * Escape an argument for safe execution in Android shell via adb shell.
- * Wraps argument in single quotes and escapes existing single quotes.
- */
-function escapeShellArg(arg) {
-  if (typeof arg !== 'string') return '';
-  return `'` + arg.replace(/'/g, "'\\''") + `'`;
-}
-
-/**
- * Execute an adb command safely with execFile (no shell injection).
- * @param {string[]} args  Arguments to pass to adb
- * @returns {Promise<{stdout: string, stderr: string}>}
- */
-async function runAdb(args) {
-  const adbPath = await findAdb();
-  if (!adbPath) throw new Error('ADB binary not found');
-
-  return new Promise((resolve, reject) => {
-    execFile(adbPath, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) {
-        // Attach stdout/stderr so callers can still inspect partial output
-        err.stdout = stdout;
-        err.stderr = stderr;
-        return reject(err);
-      }
-      resolve({ stdout, stderr });
-    });
-  });
-}
-
-/**
- * Parse the output of `adb shell ls -la` into structured file entries.
- * Expected line format:
- *   drwxrwx--x  3 root sdcard_rw  4096 2026-01-15 10:30 Documents
- *
- * @param {string} output  Raw ls -la output
- * @returns {Array<{name:string, isDirectory:boolean, isSymlink:boolean,
- *                   size:number, modified:string, permissions:string}>}
- */
-function parseAdbLsOutput(output) {
-  const entries = [];
-  const lines = output.split('\n');
-
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line) continue;
-
-    // Skip the "total" summary line
-    if (line.startsWith('total ')) continue;
-
-    // Permissions field always starts with d, l, -, c, b, p, s
-    if (!/^[dlcbps-]/.test(line)) continue;
-
-    // Split into at most 9 columns — the 9th is the filename (may contain spaces)
-    //  0: permissions  1: links  2: owner  3: group
-    //  4: size  5: date  6: time  7+: name
-    const parts = line.split(/\s+/);
-    if (parts.length < 7) continue;
-
-    const permissions = parts[0];
-    const size = parseInt(parts[4], 10) || 0;
-    const dateStr = parts[5];
-    const timeStr = parts[6];
-    const modified = `${dateStr} ${timeStr}`;
-
-    // Everything after the 7th column is the file name (handles spaces)
-    let name = parts.slice(7).join(' ');
-
-    // Skip . and .. entries
-    if (name === '.' || name === '..') continue;
-
-    let isDirectory = permissions.startsWith('d');
-    let isSymlink = permissions.startsWith('l');
-
-    // Symlinks show as  "name -> target" — strip the target
-    if (name.includes(' -> ')) {
-      isSymlink = true;
-      const parts = name.split(' -> ');
-      name = parts[0];
-      const target = parts[1] || '';
-      // If symlink target ends with slash or has no extension, treat as directory
-      if (target.endsWith('/') || !path.extname(name)) {
-        isDirectory = true;
-      }
-    } else if (isSymlink && !path.extname(name)) {
-      isDirectory = true;
-    }
-
-    entries.push({ name, isDirectory, isSymlink, size, modified, permissions });
-  }
-
-  return entries;
-}
+// ─── ADB helper functions are imported from src/adb.js (#21) ─────────────────
+// findAdb, escapeShellArg, runAdb, parseAdbLsOutput, getRemoteParent,
+// getRemoteRelative, remoteFileExists, getRemoteFilesRecursive
 
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
@@ -508,14 +377,14 @@ ipcMain.handle('list-remote-files', async (_event, { deviceId, dirPath }) => {
 
 // ─── Recursive Helpers for Transfer ──────────────────────────────────────────
 
-function getLocalFilesRecursive(baseDir, currentDir) {
+async function getLocalFilesRecursive(baseDir, currentDir) {
   let results = [];
   try {
-    const list = fs.readdirSync(currentDir, { withFileTypes: true });
+    const list = await fs.promises.readdir(currentDir, { withFileTypes: true });
     for (const entry of list) {
       const fullPath = path.join(currentDir, entry.name);
       if (entry.isDirectory()) {
-        results = results.concat(getLocalFilesRecursive(baseDir, fullPath));
+        results = results.concat(await getLocalFilesRecursive(baseDir, fullPath));
       } else {
         const relativePath = path.relative(baseDir, fullPath);
         results.push({
@@ -530,43 +399,8 @@ function getLocalFilesRecursive(baseDir, currentDir) {
   return results;
 }
 
-async function getRemoteFilesRecursive(deviceId, remotePath) {
-  try {
-    const { stdout } = await runAdb(['-s', deviceId, 'shell', 'find', escapeShellArg(remotePath), '-type', 'f']);
-    return stdout.split('\n').map(line => line.trim()).filter(Boolean);
-  } catch (err) {
-    console.error(`[RemoteRecursive] find failed for ${remotePath}:`, err.message);
-    // If find fails, treat it as a single file
-    return [remotePath];
-  }
-}
-
-function getRemoteParent(remotePath) {
-  const parts = remotePath.replace(/\/+$/, '').split('/');
-  parts.pop();
-  return parts.join('/') || '/';
-}
-
-function getRemoteRelative(parentPath, filePath) {
-  if (parentPath === '/') {
-    return filePath.startsWith('/') ? filePath.slice(1) : filePath;
-  }
-  if (filePath.startsWith(parentPath)) {
-    let rel = filePath.slice(parentPath.length);
-    if (rel.startsWith('/')) rel = rel.slice(1);
-    return rel;
-  }
-  return path.basename(filePath);
-}
-
-async function remoteFileExists(deviceId, remotePath) {
-  try {
-    await runAdb(['-s', deviceId, 'shell', 'test', '-e', escapeShellArg(remotePath)]);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// getRemoteFilesRecursive, getRemoteParent, getRemoteRelative, remoteFileExists
+// are imported from src/adb.js (#21)
 
 function runAdbWithProgress(adbPath, args, onProgressLine) {
   return new Promise((resolve, reject) => {
@@ -574,6 +408,7 @@ function runAdbWithProgress(adbPath, args, onProgressLine) {
     console.log(`[Spawn] ${execPath} ${args.join(' ')}`);
     
     const proc = spawn(execPath, args);
+    currentTransferProc = proc;
     let stdoutBuffer = '';
     let stderrBuffer = '';
 
@@ -596,6 +431,11 @@ function runAdbWithProgress(adbPath, args, onProgressLine) {
     });
 
     proc.on('close', (code) => {
+      currentTransferProc = null;
+      if (transferCancelled) {
+        reject(new Error('Transfer cancelled'));
+        return;
+      }
       if (code === 0) {
         resolve();
       } else {
@@ -607,6 +447,119 @@ function runAdbWithProgress(adbPath, args, onProgressLine) {
     });
 
     proc.on('error', (err) => {
+      currentTransferProc = null;
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Get the size of a remote file on the device via `adb shell stat`.
+ * Returns 0 if the file doesn't exist or stat fails.
+ */
+async function getRemoteFileSize(deviceId, remotePath) {
+  try {
+    const { stdout } = await runAdb(['-s', deviceId, 'shell', 'stat', '-c', '%s', escapeShellArg(remotePath)]);
+    return parseInt(stdout.trim(), 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Push a single file with size-polling progress (modern adb doesn't emit %).
+ * Calls onProgress(percent 0-100) periodically during the transfer.
+ */
+function pushWithProgress(adbPath, deviceId, localPath, remoteDest, localSize, onProgress) {
+  return new Promise((resolve, reject) => {
+    const execPath = adbPath || 'adb';
+    const proc = spawn(execPath, ['-s', deviceId, 'push', localPath, remoteDest]);
+    currentTransferProc = proc;
+
+    let stderrBuffer = '';
+    let pollTimer = null;
+
+    // Poll remote file size every 300ms to estimate progress
+    pollTimer = setInterval(async () => {
+      if (transferCancelled) return;
+      try {
+        const remoteSize = await getRemoteFileSize(deviceId, remoteDest);
+        if (remoteSize > 0 && localSize > 0) {
+          const pct = Math.min(Math.round((remoteSize / localSize) * 100), 99);
+          onProgress(pct);
+        }
+      } catch (e) {}
+    }, 300);
+
+    proc.on('close', (code) => {
+      currentTransferProc = null;
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (transferCancelled) {
+        reject(new Error('Transfer cancelled'));
+        return;
+      }
+      if (code === 0) {
+        onProgress(100);
+        resolve();
+      } else {
+        const err = new Error(`Push failed (exit ${code}): ${stderrBuffer}`);
+        reject(err);
+      }
+    });
+
+    proc.on('error', (err) => {
+      currentTransferProc = null;
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Pull a single file with size-polling progress.
+ */
+function pullWithProgress(adbPath, deviceId, remotePath, localDest, remoteSize, onProgress) {
+  return new Promise((resolve, reject) => {
+    const execPath = adbPath || 'adb';
+    const proc = spawn(execPath, ['-s', deviceId, 'pull', remotePath, localDest]);
+    currentTransferProc = proc;
+
+    let stderrBuffer = '';
+    let pollTimer = null;
+
+    // Poll local file size every 300ms to estimate progress
+    pollTimer = setInterval(() => {
+      if (transferCancelled) return;
+      try {
+        if (fs.existsSync(localDest)) {
+          const stat = fs.statSync(localDest);
+          if (stat.size > 0 && remoteSize > 0) {
+            const pct = Math.min(Math.round((stat.size / remoteSize) * 100), 99);
+            onProgress(pct);
+          }
+        }
+      } catch (e) {}
+    }, 300);
+
+    proc.on('close', (code) => {
+      currentTransferProc = null;
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (transferCancelled) {
+        reject(new Error('Transfer cancelled'));
+        return;
+      }
+      if (code === 0) {
+        onProgress(100);
+        resolve();
+      } else {
+        const err = new Error(`Pull failed (exit ${code}): ${stderrBuffer}`);
+        reject(err);
+      }
+    });
+
+    proc.on('error', (err) => {
+      currentTransferProc = null;
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
       reject(err);
     });
   });
@@ -615,7 +568,8 @@ function runAdbWithProgress(adbPath, args, onProgressLine) {
 // 7. Push files from Mac → Android (with folder expansion, conflict resolution, and real-time progress)
 ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }) => {
   const adbPath = await findAdb();
-  
+  transferCancelled = false; // Reset cancel flag at the start of a new transfer
+
   // 1. Expand all localPaths into a flat list of files with relative paths
   const filesToTransfer = [];
   for (const p of localPaths) {
@@ -623,7 +577,7 @@ ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }
       const stat = fs.statSync(p);
       if (stat.isDirectory()) {
         const parentDir = path.dirname(p);
-        const dirFiles = getLocalFilesRecursive(parentDir, p);
+        const dirFiles = await getLocalFilesRecursive(parentDir, p);
         filesToTransfer.push(...dirFiles);
       } else {
         filesToTransfer.push({
@@ -643,6 +597,7 @@ ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }
   let conflictResolution = null; // null, 'replace-all', 'skip-all'
 
   for (let i = 0; i < total; i++) {
+    if (transferCancelled) break;
     const file = filesToTransfer[i];
     const fileName = path.basename(file.fullPath);
     const remoteDest = remotePath.replace(/\/+$/, '') + '/' + file.relativePath;
@@ -688,6 +643,8 @@ ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }
         }
       }
 
+      if (transferCancelled) break;
+
       console.log(`[Push] ${fileName} (${i + 1}/${total}) → ${remoteDest}`);
 
       // Ensure the remote parent directory exists first
@@ -705,34 +662,36 @@ ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }
         });
       }
 
-      // Run adb push with progress parsing
-      await runAdbWithProgress(adbPath, ['-s', deviceId, 'push', '-p', file.fullPath, remoteDest], (line) => {
-        const match = line.match(/(\d+)%/);
-        if (match && win) {
-          const currentFilePercent = parseInt(match[1], 10);
+      // Get local file size for progress polling
+      const localFileSize = fs.statSync(file.fullPath).size;
+
+      // Run adb push with size-polling progress
+      await pushWithProgress(adbPath, deviceId, file.fullPath, remoteDest, localFileSize, (currentFilePercent) => {
+        if (win) {
           const basePercent = (i / total) * 100;
           const fileContribution = (1 / total) * currentFilePercent;
           const overallPercent = Math.round(basePercent + fileContribution);
-          
           win.webContents.send('transfer-progress', {
             current: i + 1,
             total,
             fileName,
-            percent: Math.min(overallPercent, 99), // cap at 99% until file actually succeeds
+            percent: Math.min(overallPercent, 99),
           });
         }
       });
 
+      if (transferCancelled) break;
       transferred++;
     } catch (err) {
+      if (transferCancelled) break;
       failed++;
       errors.push({ file: fileName, error: err.message });
       console.error(`[Push] Failed ${fileName}:`, err.message);
     }
   }
 
-  // Final 100% update
-  if (win && total > 0) {
+  // Final 100% update (skip if the user cancelled)
+  if (win && total > 0 && !transferCancelled) {
     win.webContents.send('transfer-progress', {
       current: total,
       total,
@@ -741,12 +700,24 @@ ipcMain.handle('push-files', async (_event, { deviceId, localPaths, remotePath }
     });
   }
 
-  return { success: failed === 0, transferred, failed, errors };
+  const result = { success: failed === 0 && !transferCancelled, transferred, failed, errors, cancelled: transferCancelled };
+  if (transferred > 0) {
+    addHistoryEntry({
+      timestamp: new Date().toISOString(),
+      direction: 'push',
+      deviceId,
+      remotePath,
+      fileCount: transferred,
+      failed,
+    });
+  }
+  return result;
 });
 
 // 8. Pull files from Android → Mac (with folder expansion, conflict resolution, and real-time progress)
 ipcMain.handle('pull-files', async (_event, { deviceId, remotePaths, localPath }) => {
   const adbPath = await findAdb();
+  transferCancelled = false; // Reset cancel flag at the start of a new transfer
 
   // 1. Expand all remotePaths recursively
   const filesToTransfer = [];
@@ -768,6 +739,7 @@ ipcMain.handle('pull-files', async (_event, { deviceId, remotePaths, localPath }
   let conflictResolution = null; // null, 'replace-all', 'skip-all'
 
   for (let i = 0; i < total; i++) {
+    if (transferCancelled) break;
     const file = filesToTransfer[i];
     const fileName = file.fullPath.split('/').pop();
     const localDest = path.join(localPath, file.relativePath);
@@ -813,6 +785,8 @@ ipcMain.handle('pull-files', async (_event, { deviceId, remotePaths, localPath }
         }
       }
 
+      if (transferCancelled) break;
+
       console.log(`[Pull] ${fileName} (${i + 1}/${total}) → ${localDest}`);
 
       // Ensure the local parent directory exists
@@ -830,34 +804,36 @@ ipcMain.handle('pull-files', async (_event, { deviceId, remotePaths, localPath }
         });
       }
 
-      // Run adb pull with progress parsing
-      await runAdbWithProgress(adbPath, ['-s', deviceId, 'pull', '-p', file.fullPath, localDest], (line) => {
-        const match = line.match(/(\d+)%/);
-        if (match && win) {
-          const currentFilePercent = parseInt(match[1], 10);
+      // Get remote file size for progress polling
+      const remoteFileSize = await getRemoteFileSize(deviceId, file.fullPath);
+
+      // Run adb pull with size-polling progress
+      await pullWithProgress(adbPath, deviceId, file.fullPath, localDest, remoteFileSize, (currentFilePercent) => {
+        if (win) {
           const basePercent = (i / total) * 100;
           const fileContribution = (1 / total) * currentFilePercent;
           const overallPercent = Math.round(basePercent + fileContribution);
-          
           win.webContents.send('transfer-progress', {
             current: i + 1,
             total,
             fileName,
-            percent: Math.min(overallPercent, 99), // cap at 99% until file actually succeeds
+            percent: Math.min(overallPercent, 99),
           });
         }
       });
 
+      if (transferCancelled) break;
       transferred++;
     } catch (err) {
+      if (transferCancelled) break;
       failed++;
       errors.push({ file: fileName, error: err.message });
       console.error(`[Pull] Failed ${fileName}:`, err.message);
     }
   }
 
-  // Final 100% update
-  if (win && total > 0) {
+  // Final 100% update (skip if the user cancelled)
+  if (win && total > 0 && !transferCancelled) {
     win.webContents.send('transfer-progress', {
       current: total,
       total,
@@ -866,11 +842,69 @@ ipcMain.handle('pull-files', async (_event, { deviceId, remotePaths, localPath }
     });
   }
 
-  return { success: failed === 0, transferred, failed, errors };
+  const result = { success: failed === 0 && !transferCancelled, transferred, failed, errors, cancelled: transferCancelled };
+  if (transferred > 0) {
+    addHistoryEntry({
+      timestamp: new Date().toISOString(),
+      direction: 'pull',
+      deviceId,
+      localPath,
+      fileCount: transferred,
+      failed,
+    });
+  }
+  return result;
+});
+
+// Cancel an in-progress push/pull transfer. Sets the cancel flag and kills the
+// active adb spawn so the running file aborts immediately.
+ipcMain.handle('cancel-transfer', async () => {
+  transferCancelled = true;
+  transferPaused = false;
+  if (currentTransferProc) {
+    try { currentTransferProc.kill('SIGTERM'); } catch (e) {}
+  }
+  return { success: true };
+});
+
+// Pause an in-progress transfer by sending SIGSTOP to the adb process.
+// The file copy halts at the OS level until resumed.
+ipcMain.handle('pause-transfer', async () => {
+  if (!currentTransferProc) return { success: false, error: 'No active transfer' };
+  try {
+    transferPaused = true;
+    currentTransferProc.kill('SIGSTOP');
+    return { success: true, paused: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Resume a paused transfer by sending SIGCONT to the adb process.
+ipcMain.handle('resume-transfer', async () => {
+  if (!currentTransferProc) return { success: false, error: 'No active transfer' };
+  try {
+    transferPaused = false;
+    currentTransferProc.kill('SIGCONT');
+    return { success: true, paused: false };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
 ipcMain.handle('get-app-version', () => {
   return app.getVersion();
+});
+
+// Clipboard support — navigator.clipboard can fail in sandboxed renderers
+const { clipboard } = require('electron');
+ipcMain.handle('copy-to-clipboard', (_event, text) => {
+  try {
+    clipboard.writeText(text);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
 // 9. Delete a file or directory on the device
@@ -916,6 +950,112 @@ ipcMain.handle('create-remote-dir', async (_event, { deviceId, remotePath }) => 
     return { success: true };
   } catch (err) {
     console.error('[IPC] create-remote-dir error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── Settings & History IPC handlers (#17, #18, #13) ─────────────────────────
+// loadSettings/saveSettings/loadHistory/saveHistory/addHistoryEntry are
+// imported from src/settings.js via wrapper aliases above.
+
+ipcMain.handle('get-settings', () => {
+  return loadSettings();
+});
+
+ipcMain.handle('set-settings', (_event, partial) => {
+  try {
+    const current = loadSettings();
+    const merged = { ...current, ...partial };
+    saveSettings(merged);
+    return { success: true, settings: merged };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('get-transfer-history', () => {
+  return loadHistory();
+});
+
+ipcMain.handle('clear-transfer-history', () => {
+  saveHistory([]);
+  return { success: true };
+});
+
+// ─── File Rename (#16) ──────────────────────────────────────────────────────
+
+ipcMain.handle('rename-local', async (_event, { oldPath, newName }) => {
+  try {
+    const resolvedOld = path.resolve(oldPath);
+    if (!isPathAllowed(resolvedOld)) return { success: false, error: 'Access denied' };
+    const newPath = path.join(path.dirname(resolvedOld), newName);
+    if (!isPathAllowed(path.resolve(newPath))) return { success: false, error: 'Access denied' };
+    if (fs.existsSync(newPath)) return { success: false, error: 'A file with that name already exists' };
+    fs.renameSync(resolvedOld, newPath);
+    console.log(`[Rename] ${resolvedOld} → ${newPath}`);
+    return { success: true };
+  } catch (err) {
+    console.error('[IPC] rename-local error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('rename-remote', async (_event, { deviceId, remotePath, newName }) => {
+  try {
+    const parent = getRemoteParent(remotePath);
+    const newPath = parent === '/' ? '/' + newName : parent + '/' + newName;
+    await runAdb(['-s', deviceId, 'shell', 'mv', escapeShellArg(remotePath), escapeShellArg(newPath)]);
+    console.log(`[Rename] ${remotePath} → ${newPath}`);
+    return { success: true };
+  } catch (err) {
+    console.error('[IPC] rename-remote error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── Auto-Update Check (#20) ─────────────────────────────────────────────────
+
+ipcMain.handle('check-for-updates', async () => {
+  try {
+    const settings = loadSettings();
+    const repo = settings.updateRepo || '';
+    if (!repo) return { success: false, error: 'No update repository configured. Set one in Settings.' };
+
+    const https = require('https');
+    const data = await new Promise((resolve, reject) => {
+      https.get({
+        hostname: 'api.github.com',
+        path: `/repos/${repo}/releases/latest`,
+        headers: { 'User-Agent': 'DroidBridge-Update-Check', 'Accept': 'application/vnd.github+json' },
+        timeout: 10000,
+      }, (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(`GitHub API returned ${res.statusCode}`));
+            return;
+          }
+          try { resolve(JSON.parse(body)); }
+          catch (e) { reject(new Error('Failed to parse GitHub response')); }
+        });
+      }).on('error', reject).on('timeout', function() { this.destroy(); reject(new Error('Request timed out')); });
+    });
+
+    const latestVersion = (data.tag_name || '').replace(/^v/, '');
+    const currentVersion = app.getVersion();
+    const downloadUrl = (data.html_url) || '';
+    const releaseNotes = (data.body || '').slice(0, 500);
+
+    return {
+      success: true,
+      currentVersion,
+      latestVersion,
+      hasUpdate: latestVersion && latestVersion !== currentVersion,
+      downloadUrl,
+      releaseNotes,
+    };
+  } catch (err) {
     return { success: false, error: err.message };
   }
 });
@@ -999,24 +1139,7 @@ let wifiRateLimitMap = new Map(); // IP -> request count for basic rate limiting
 let wifiToken = ''; // Session access token for Wi-Fi authentication (F1)
 let wifiCleanupTimer = null; // Pruning timer for rate limit map memory leak (F8)
 
-/**
- * Check if a path is within the allowed Wi-Fi shared directory (resolves symlinks).
- */
-function isWifiPathAllowed(targetPath) {
-  try {
-    const resolvedTarget = path.resolve(targetPath);
-    // Find the closest existing parent directory in the path ancestry to check realpath
-    let dir = resolvedTarget;
-    while (dir && dir !== '/' && !fs.existsSync(dir)) {
-      dir = path.dirname(dir);
-    }
-    const resolvedTargetReal = fs.realpathSync(dir);
-    const resolvedShare = fs.realpathSync(wifiSharedDir);
-    return resolvedTargetReal === resolvedShare || resolvedTargetReal.startsWith(resolvedShare + path.sep);
-  } catch {
-    return false;
-  }
-}
+// isWifiPathAllowed, getCookie, tokenEquals are imported from src/security.js (#21)
 
 function getLocalIpAddress() {
   const interfaces = os.networkInterfaces();
@@ -1031,875 +1154,29 @@ function getLocalIpAddress() {
   return '127.0.0.1';
 }
 
-function getCookie(req, name) {
-  const list = {};
-  const rc = req.headers.cookie;
-  if (rc) {
-    rc.split(';').forEach((cookie) => {
-      const parts = cookie.split('=');
-      list[parts.shift().trim()] = decodeURIComponent(parts.join('='));
-    });
-  }
-  return list[name];
-}
-
 // Mobile Web UI template
+let _mobileHtmlTemplate = '';
 function getMobileHtml(nonce = '') {
+  if (!_mobileHtmlTemplate) {
+    try { _mobileHtmlTemplate = fs.readFileSync(path.join(__dirname, 'mobile.html'), 'utf-8'); }
+    catch (e) { console.error('[WiFi] Failed to load mobile.html:', e.message); return '<h1>Template load error</h1>'; }
+  }
   const currentFolderName = path.basename(wifiSharedDir) || 'Shared';
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>DroidBridge WiFi Share</title>
-  <style nonce="${nonce}">
-    :root {
-      --bg: #0a0a0f;
-      --card: #12121a;
-      --border: rgba(255, 255, 255, 0.06);
-      --primary: #6c5ce7;
-      --primary-glow: rgba(108, 92, 231, 0.3);
-      --text: #e8e8f0;
-      --text-muted: #8888a0;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      padding: 20px;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-    }
-    .header {
-      text-align: center;
-      margin-bottom: 24px;
-      margin-top: 10px;
-    }
-    .logo {
-      font-size: 32px;
-      margin-bottom: 8px;
-    }
-    h1 {
-      font-size: 20px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-    }
-    .subtitle {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-top: 4px;
-    }
-    .card {
-      width: 100%;
-      max-width: 450px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 24px;
-      margin-bottom: 20px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    }
-    .upload-zone {
-      border: 2px dashed var(--border);
-      border-radius: 12px;
-      padding: 32px 16px;
-      text-align: center;
-      cursor: pointer;
-      display: block;
-      transition: all 0.2s ease;
-      position: relative;
-    }
-    .upload-zone:active, .upload-zone.dragover {
-      border-color: var(--primary);
-      background: rgba(108, 92, 231, 0.05);
-      box-shadow: 0 0 15px var(--primary-glow);
-    }
-    .upload-icon {
-      font-size: 40px;
-      margin-bottom: 12px;
-    }
-    .upload-text {
-      font-size: 14px;
-      font-weight: 500;
-      margin-bottom: 6px;
-    }
-    .upload-sub {
-      font-size: 11px;
-      color: var(--text-muted);
-    }
-    #file-input {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      opacity: 0.001;
-      z-index: 10;
-      cursor: pointer;
-      display: block;
-    }
-    .progress-container {
-      margin-top: 16px;
-      display: none;
-    }
-    .progress-info {
-      display: flex;
-      justify-content: space-between;
-      font-size: 12px;
-      margin-bottom: 6px;
-      color: var(--text-muted);
-    }
-    .progress-bar {
-      height: 6px;
-      background: rgba(255, 255, 255, 0.06);
-      border-radius: 3px;
-      overflow: hidden;
-    }
-    .progress-fill {
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(90deg, var(--primary), #a29bfe);
-      border-radius: 3px;
-      transition: width 0.1s ease;
-    }
-    .section-title {
-      font-size: 14px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
-      color: var(--text-muted);
-      margin-bottom: 12px;
-    }
-    .browser-header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 16px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--border);
-    }
-    .back-btn {
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid var(--border);
-      color: var(--text);
-      font-size: 11px;
-      font-weight: 600;
-      padding: 6px 10px;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    .back-btn:active {
-      background: var(--primary);
-      border-color: var(--primary);
-    }
-    .current-path {
-      font-size: 12px;
-      font-family: monospace;
-      color: var(--text-muted);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .file-list {
-      list-style: none;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .file-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 12px;
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      transition: all 0.2s ease;
-    }
-    .file-item:active {
-      background: rgba(255, 255, 255, 0.04);
-    }
-    .file-left-group {
-      display: flex;
-      align-items: center;
-      overflow: hidden;
-      margin-right: 12px;
-    }
-    .file-thumb {
-      width: 44px;
-      height: 44px;
-      border-radius: 8px;
-      object-fit: cover;
-      border: 1px solid var(--border);
-      background: rgba(255, 255, 255, 0.05);
-      flex-shrink: 0;
-      margin-right: 12px;
-    }
-    .file-icon-badge {
-      width: 44px;
-      height: 44px;
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 20px;
-      flex-shrink: 0;
-      margin-right: 12px;
-    }
-    .file-details {
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    .file-name {
-      font-size: 13px;
-      font-weight: 500;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .file-size {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 2px;
-    }
-    .action-group {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-shrink: 0;
-    }
-    .preview-btn {
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: 6px;
-      padding: 6px 10px;
-      cursor: pointer;
-      font-size: 11px;
-      font-weight: 600;
-      text-decoration: none;
-      transition: all 0.2s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .preview-btn:active {
-      background: rgba(255, 255, 255, 0.15);
-    }
-    .download-btn, .open-btn {
-      background: rgba(108, 92, 231, 0.1);
-      border: 1px solid rgba(108, 92, 231, 0.2);
-      color: var(--primary-light);
-      border-radius: 6px;
-      padding: 6px 12px;
-      cursor: pointer;
-      font-size: 11px;
-      font-weight: 600;
-      text-decoration: none;
-      transition: all 0.2s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-    .download-btn:active, .open-btn:active {
-      background: var(--primary);
-      color: white;
-    }
-    .empty-state {
-      text-align: center;
-      padding: 20px;
-      color: var(--text-muted);
-      font-size: 12px;
-    }
-    .footer {
-      font-size: 10px;
-      color: var(--text-muted);
-      margin-top: auto;
-      padding-top: 20px;
-      text-align: center;
-    }
-
-    /* Modal Preview Overlay */
-    .modal-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(10, 10, 15, 0.9);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 1000;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.25s ease;
-      padding: 16px;
-    }
-    .hidden { display: none !important; }
-    .modal-overlay.active {
-      opacity: 1;
-      pointer-events: auto;
-    }
-    .modal-content {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      width: 100%;
-      max-width: 600px;
-      max-height: 85vh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      box-shadow: 0 16px 48px rgba(0,0,0,0.5);
-    }
-    .modal-header {
-      padding: 14px 18px;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    #modal-filename {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 80%;
-    }
-    .modal-close {
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
-      font-size: 22px;
-      cursor: pointer;
-      padding: 0 4px;
-      line-height: 1;
-    }
-    .modal-close:hover {
-      color: var(--text);
-    }
-    .modal-body {
-      padding: 16px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: auto;
-      min-height: 200px;
-      background: #000;
-    }
-    .modal-body img, .modal-body video {
-      max-width: 100%;
-      max-height: 65vh;
-      object-fit: contain;
-      border-radius: 8px;
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="logo">📶</div>
-    <h1>DroidBridge Wi-Fi Share</h1>
-    <div class="subtitle">Designed by Shubham Gour</div>
-  </div>
-
-  <div class="card">
-    <div class="upload-zone" id="drop-zone">
-      <div class="upload-icon">📤</div>
-      <div class="upload-text">Upload files to Mac</div>
-      <div class="upload-sub">Tap here to choose files</div>
-      <input type="file" id="file-input" multiple>
-    </div>
-
-    <div class="progress-container" id="progress-box">
-      <div class="progress-info">
-        <span id="progress-file">File Name</span>
-        <span id="progress-percent">0%</span>
-      </div>
-      <div class="progress-bar">
-        <div class="progress-fill" id="progress-fill"></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="section-title">Download from Mac</div>
-    
-    <div class="browser-header">
-      <button class="back-btn hidden" id="btn-back">← Back</button>
-      <span class="current-path" id="path-display">📁 ${currentFolderName}</span>
-    </div>
-
-    <ul class="file-list" id="files-container">
-      <li class="empty-state">Loading shared files...</li>
-    </ul>
-  </div>
-
-  <div class="footer">
-    Powered by DroidBridge • Both devices must be on the same Wi-Fi
-  </div>
-
-  <!-- Modal Preview Overlay -->
-  <div id="preview-modal" class="modal-overlay">
-    <div class="modal-content" id="modal-card">
-      <div class="modal-header">
-        <span id="modal-filename">File Preview</span>
-        <button class="modal-close" id="modal-close-btn">&times;</button>
-      </div>
-      <div class="modal-body" id="modal-body"></div>
-    </div>
-  </div>
-
-  <script nonce="${nonce}">
-    const fileInput = document.getElementById('file-input');
-    const progressBox = document.getElementById('progress-box');
-    const progressFile = document.getElementById('progress-file');
-    const progressPercent = document.getElementById('progress-percent');
-    const progressFill = document.getElementById('progress-fill');
-    const filesContainer = document.getElementById('files-container');
-    const pathDisplay = document.getElementById('path-display');
-    const btnBack = document.getElementById('btn-back');
-
-    let currentPath = '';
-
-    function openPreview(fileName, relativePath) {
-      const modal = document.getElementById('preview-modal');
-      const title = document.getElementById('modal-filename');
-      const body = document.getElementById('modal-body');
-      
-      title.textContent = fileName;
-      body.innerHTML = '';
-      
-      const fileUrl = '/download?file=' + encodeURIComponent(relativePath);
-      const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
-      const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
-      const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
-
-      if (imageExts.includes(ext)) {
-        const img = document.createElement('img');
-        img.src = fileUrl + '&inline=1';
-        body.appendChild(img);
-      } else if (videoExts.includes(ext)) {
-        const video = document.createElement('video');
-        video.src = fileUrl + '&inline=1';
-        video.controls = true;
-        video.autoplay = true;
-        video.playsInline = true;
-        body.appendChild(video);
-      } else if (ext === 'pdf' || ext === 'txt' || ext === 'html' || ext === 'json') {
-        window.open(fileUrl + '&inline=1', '_blank');
-        return;
-      } else {
-        window.open(fileUrl + '&dl=1', '_blank');
-        return;
-      }
-      
-      modal.classList.add('active');
-    }
-
-    function closePreviewModal(e) {
-      if (e && e.stopPropagation) e.stopPropagation();
-      const modal = document.getElementById('preview-modal');
-      const body = document.getElementById('modal-body');
-      if (body) {
-        const mediaElements = body.querySelectorAll('video, audio');
-        mediaElements.forEach(m => {
-          try {
-            m.pause();
-            m.src = '';
-            m.load();
-          } catch(err) {}
-        });
-        body.innerHTML = '';
-      }
-      if (modal) modal.classList.remove('active');
-    }
-
-    function getFilePreviewElement(fileName, relativePath, isDirectory) {
-      if (isDirectory) {
-        const div = document.createElement('div');
-        div.className = 'file-icon-badge';
-        div.textContent = '📁';
-        return div;
-      }
-      
-      const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
-      const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
-      const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
-      const fileUrl = '/download?file=' + encodeURIComponent(relativePath);
-      
-      if (imageExts.includes(ext)) {
-        const img = document.createElement('img');
-        img.className = 'file-thumb';
-        img.loading = 'lazy';
-        img.alt = 'preview';
-        img.src = fileUrl;
-        img.onerror = function() {
-          const badge = document.createElement('div');
-          badge.className = 'file-icon-badge';
-          badge.textContent = '🖼️';
-          img.replaceWith(badge);
-        };
-        return img;
-      }
-
-      if (videoExts.includes(ext)) {
-        const video = document.createElement('video');
-        video.className = 'file-thumb';
-        video.preload = 'metadata';
-        video.muted = true;
-        video.playsInline = true;
-        video.src = fileUrl + '#t=0.5';
-        video.onerror = function() {
-          const badge = document.createElement('div');
-          badge.className = 'file-icon-badge';
-          badge.textContent = '🎬';
-          video.replaceWith(badge);
-        };
-        return video;
-      }
-
-      const iconMap = {
-        mp3: '🎵', wav: '🎵', flac: '🎵', m4a: '🎵', ogg: '🎵',
-        pdf: '📕', doc: '📘', docx: '📘', txt: '📝', json: '💻',
-        zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
-        apk: '📲', dmg: '💿'
-      };
-      
-      const badge = document.createElement('div');
-      badge.className = 'file-icon-badge';
-      badge.textContent = iconMap[ext] || '📄';
-      return badge;
-    }
-
-    // Load files list
-    async function loadFiles() {
-      try {
-        const res = await fetch('/files?path=' + encodeURIComponent(currentPath));
-        const data = await res.json();
-        const files = Array.isArray(data) ? data : (data.files || []);
-        const rootFolderName = (data && data.folderName) ? data.folderName : 'Shared';
-        
-        // Update breadcrumb UI
-        pathDisplay.textContent = currentPath ? '📁 ' + rootFolderName + ' / ' + currentPath : '📁 ' + rootFolderName;
-        btnBack.classList.toggle('hidden', !currentPath);
-
-        filesContainer.innerHTML = '';
-        if (files.length === 0) {
-          filesContainer.innerHTML = '<li class="empty-state">No items in this folder</li>';
-          return;
-        }
-        
-        files.forEach(f => {
-          const item = document.createElement('li');
-          item.className = 'file-item';
-          
-          const relativeFilePath = currentPath ? currentPath + '/' + f.name : f.name;
-          const previewEl = getFilePreviewElement(f.name, relativeFilePath, f.isDirectory);
-
-          const leftGroup = document.createElement('div');
-          leftGroup.className = 'file-left-group';
-          leftGroup.appendChild(previewEl);
-
-          const details = document.createElement('div');
-          details.className = 'file-details';
-          
-          const nameSpan = document.createElement('span');
-          nameSpan.className = 'file-name';
-          nameSpan.textContent = f.name;
-
-          const sizeSpan = document.createElement('span');
-          sizeSpan.className = 'file-size';
-          sizeSpan.textContent = f.isDirectory ? 'Folder' : formatBytes(f.size);
-
-          details.appendChild(nameSpan);
-          details.appendChild(sizeSpan);
-          leftGroup.appendChild(details);
-
-          item.appendChild(leftGroup);
-
-          const actionGroup = document.createElement('div');
-          actionGroup.className = 'action-group';
-
-          if (f.isDirectory) {
-            const openBtn = document.createElement('button');
-            openBtn.className = 'open-btn';
-            openBtn.textContent = 'Open ➔';
-            openBtn.onclick = () => navigateInto(f.name);
-            actionGroup.appendChild(openBtn);
-          } else {
-            const ext = f.name.includes('.') ? f.name.split('.').pop().toLowerCase() : '';
-            const previewableExts = [
-              // Images
-              'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg',
-              // Videos
-              'mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp',
-              // Audio
-              'mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac',
-              // Docs/Text
-              'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'json', 'html', 'xml', 'csv'
-            ];
-
-            if (previewableExts.includes(ext)) {
-              const previewBtn = document.createElement('button');
-              previewBtn.className = 'preview-btn';
-              previewBtn.textContent = '👁️ Preview';
-              previewBtn.onclick = () => openPreview(f.name, relativeFilePath);
-              actionGroup.appendChild(previewBtn);
-            }
-
-            const dlBtn = document.createElement('a');
-            dlBtn.className = 'download-btn';
-            dlBtn.href = '/download?file=' + encodeURIComponent(relativeFilePath);
-            dlBtn.textContent = '⬇️ Download';
-            actionGroup.appendChild(dlBtn);
-          }
-
-          item.appendChild(actionGroup);
-          filesContainer.appendChild(item);
-        });
-      } catch (err) {
-        filesContainer.innerHTML = '<li class="empty-state">Failed to load files</li>';
-      }
-    }
-
-    function navigateInto(dirName) {
-      currentPath = currentPath ? currentPath + '/' + dirName : dirName;
-      loadFiles();
-    }
-
-    function navigateBack() {
-      const parts = currentPath.split('/');
-      parts.pop();
-      currentPath = parts.join('/');
-      loadFiles();
-    }
-
-    // Format bytes
-    function formatBytes(bytes) {
-      if (bytes === 0) return '0 B';
-      const k = 1024;
-      const sizes = ['B', 'KB', 'MB', 'GB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-    }
-
-    // Upload handlers
-    fileInput.addEventListener('change', async (e) => {
-      const files = e.target.files;
-      if (files.length === 0) return;
-      
-      progressBox.style.display = 'block';
-      
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        progressFile.textContent = file.name;
-        progressPercent.textContent = '0%';
-        progressFill.style.width = '0%';
-
-        try {
-          await uploadFile(file);
-        } catch (err) {
-          alert('Upload failed: ' + file.name);
-        }
-      }
-      
-      progressBox.style.display = 'none';
-      fileInput.value = '';
-      loadFiles();
-    });
-
-    function uploadFile(file) {
-      return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        const uploadPath = currentPath ? currentPath + '/' + file.name : file.name;
-        xhr.open('POST', '/upload');
-        xhr.setRequestHeader('X-File-Name', encodeURIComponent(uploadPath));
-        
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const pct = Math.round((e.loaded / e.total) * 100);
-            progressPercent.textContent = pct + '%';
-            progressFill.style.width = pct + '%';
-          }
-        };
-
-        xhr.onload = () => {
-          if (xhr.status === 200) resolve();
-          else reject();
-        };
-        xhr.onerror = () => reject();
-        xhr.send(file);
-      });
-    }
-
-    // Drop zone highlighting
-    const dropZone = document.getElementById('drop-zone');
-    dropZone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropZone.classList.add('dragover');
-    });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-    dropZone.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      dropZone.classList.remove('dragover');
-      const droppedFiles = e.dataTransfer.files;
-      if (droppedFiles.length > 0) {
-        progressBox.style.display = 'block';
-        for (let i = 0; i < droppedFiles.length; i++) {
-          const file = droppedFiles[i];
-          progressFile.textContent = file.name;
-          progressPercent.textContent = '0%';
-          progressFill.style.width = '0%';
-          try {
-            await uploadFile(file);
-          } catch (err) {
-            alert('Upload failed: ' + file.name);
-          }
-        }
-        progressBox.style.display = 'none';
-        loadFiles();
-      }
-    });
-
-    // Modal & Back Button Event Listeners
-    btnBack.addEventListener('click', navigateBack);
-    document.getElementById('modal-close-btn')?.addEventListener('click', closePreviewModal);
-    const previewModal = document.getElementById('preview-modal');
-    if (previewModal) {
-      previewModal.addEventListener('click', (e) => {
-        if (e.target === previewModal) closePreviewModal();
-      });
-    }
-
-    // Boot
-    loadFiles();
-  </script>
-</body>
-</html>
-`;
+  return _mobileHtmlTemplate
+    .replace(/__NONCE__/g, nonce)
+    .replace(/__FOLDER_NAME__/g, currentFolderName);
 }
 
+let _loginHtmlTemplate = '';
 function getLoginHtml(errorMsg = '', nonce = '') {
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DroidBridge Wi-Fi Share Login</title>
-  <style nonce="${nonce}">
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    body {
-      background-color: #08080c;
-      color: #e2e2e9;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 20px;
-    }
-    .login-container {
-      background-color: #111119;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 12px;
-      padding: 32px;
-      width: 100%;
-      max-width: 400px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-      text-align: center;
-    }
-    h2 {
-      font-size: 20px;
-      font-weight: 600;
-      margin-bottom: 8px;
-      color: #fff;
-    }
-    p {
-      font-size: 13px;
-      color: #8888a0;
-      margin-bottom: 24px;
-      line-height: 1.5;
-    }
-    .input-group {
-      margin-bottom: 20px;
-      text-align: left;
-    }
-    label {
-      display: block;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      color: #5f5f7a;
-      margin-bottom: 8px;
-      font-weight: 700;
-    }
-    input[type="text"] {
-      width: 100%;
-      background-color: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 8px;
-      padding: 12px 16px;
-      color: #fff;
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.2s, box-shadow 0.2s;
-    }
-    input[type="text"]:focus {
-      border-color: #6c5ce7;
-      box-shadow: 0 0 0 2px rgba(108, 92, 231, 0.2);
-    }
-    button {
-      width: 100%;
-      background-color: #6c5ce7;
-      color: white;
-      border: none;
-      border-radius: 8px;
-      padding: 12px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background-color 0.2s, transform 0.1s;
-    }
-    button:hover {
-      background-color: #5b4cc4;
-    }
-    button:active {
-      transform: scale(0.98);
-    }
-    .error-msg {
-      color: #ff6b6b;
-      font-size: 13px;
-      margin-top: 16px;
-    }
-  </style>
-</head>
-<body>
-  <div class="login-container">
-    <h2>DroidBridge Wi-Fi Share</h2>
-    <p>Please enter the Wi-Fi Share Access Token shown on the Mac application screen to connect.</p>
-    <form method="POST" action="/login">
-      <div class="input-group">
-        <label for="token-input">Access Token</label>
-        <input type="text" id="token-input" name="token" placeholder="Enter Token" required autocomplete="off" />
-      </div>
-      <button type="submit">Access Files</button>
-    </form>
-    ${errorMsg ? `<div class="error-msg">${errorMsg}</div>` : ''}
-  </div>
-</body>
-</html>`;
+  if (!_loginHtmlTemplate) {
+    try { _loginHtmlTemplate = fs.readFileSync(path.join(__dirname, 'login.html'), 'utf-8'); }
+    catch (e) { console.error('[WiFi] Failed to load login.html:', e.message); return '<h1>Template load error</h1>'; }
+  }
+  const errorHtml = errorMsg ? '<div class="error-msg">' + errorMsg + '</div>' : '';
+  return _loginHtmlTemplate
+    .replace(/__NONCE__/g, nonce)
+    .replace(/__ERROR_MSG__/, errorHtml);
 }
 
 // Start Wi-Fi Server
@@ -1918,6 +1195,15 @@ async function startWifiServer() {
       token: wifiToken
     };
   }
+
+  // Apply saved Wi-Fi port setting (if present and valid) before binding
+  try {
+    const saved = loadSettings();
+    if (saved.wifiPort && Number.isInteger(saved.wifiPort) && saved.wifiPort >= 1024 && saved.wifiPort <= 65535) {
+      wifiPort = saved.wifiPort;
+      console.log(`[WiFi] Using saved port from settings: ${wifiPort}`);
+    }
+  } catch (e) {}
 
   // Ensure shared directory exists
   try {
@@ -1982,7 +1268,7 @@ async function startWifiServer() {
         req.on('end', () => {
           const params = new URLSearchParams(body);
           const submittedToken = params.get('token');
-          if (submittedToken === wifiToken) {
+          if (tokenEquals(submittedToken, wifiToken)) {
             res.writeHead(302, {
               'Set-Cookie': `sid=${wifiToken}; Path=/; HttpOnly; SameSite=Strict`,
               'Location': '/'
@@ -2003,10 +1289,10 @@ async function startWifiServer() {
       // Validate Authentication (F1)
       const queryToken = reqUrl.searchParams.get('token');
       const cookieToken = getCookie(req, 'sid');
-      const isAuthenticated = (queryToken === wifiToken) || (cookieToken === wifiToken);
+      const isAuthenticated = tokenEquals(queryToken, wifiToken) || tokenEquals(cookieToken, wifiToken);
 
       // Auto-set cookie and redirect to clean URL if token is passed via query
-      if (queryToken === wifiToken && cookieToken !== wifiToken) {
+      if (tokenEquals(queryToken, wifiToken) && !tokenEquals(cookieToken, wifiToken)) {
         res.writeHead(302, {
           'Set-Cookie': `sid=${wifiToken}; Path=/; HttpOnly; SameSite=Strict`,
           'Location': '/'
@@ -2148,6 +1434,51 @@ async function startWifiServer() {
         return;
       }
 
+      // Handle Folder ZIP Downloads (#19)
+      if (reqUrl.pathname === '/download-folder' && req.method === 'GET') {
+        const folderName = reqUrl.searchParams.get('folder');
+        if (!folderName) {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end('Missing folder parameter');
+          return;
+        }
+        const folderPath = path.resolve(wifiSharedDir, folderName);
+        if (!isWifiPathAllowed(folderPath)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain' });
+          res.end('Access Denied');
+          return;
+        }
+        if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          res.end('Folder not found');
+          return;
+        }
+
+        try {
+          const archiver = require('archiver');
+          const zipName = path.basename(folderPath) + '.zip';
+          res.writeHead(200, {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${encodeURIComponent(zipName)}"`,
+          });
+          const archive = archiver('zip', { zlib: { level: 5 } });
+          archive.directory(folderPath, path.basename(folderPath));
+          archive.on('error', (err) => {
+            console.error('[WiFi] ZIP error:', err.message);
+          });
+          res.on('close', () => { archive.destroy(); });
+          archive.pipe(res);
+          archive.finalize();
+        } catch (err) {
+          console.error('[WiFi] ZIP download failed:', err.message);
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'text/plain' });
+            res.end('ZIP creation failed: ' + err.message);
+          }
+        }
+        return;
+      }
+
       // Handle File Uploads (piped binary stream)
       if (reqUrl.pathname === '/upload' && req.method === 'POST') {
         const rawFileName = req.headers['x-file-name'];
@@ -2209,6 +1540,21 @@ async function startWifiServer() {
           if (win) {
             win.webContents.send('wifi-upload-progress', { fileName, percent: 100, completed: true });
           }
+          // Record in transfer history (#13)
+          try {
+            // Strip IPv4-mapped IPv6 prefix (::ffff:) to show clean IPv4
+            let clientIp = req.socket.remoteAddress || '';
+            if (clientIp.startsWith('::ffff:')) clientIp = clientIp.slice(7);
+            addHistoryEntry({
+              timestamp: new Date().toISOString(),
+              direction: 'wifi-upload',
+              fileName,
+              fileSize: totalSize,
+              clientIp,
+              fileCount: 1,
+              failed: 0,
+            });
+          } catch (e) { console.error('[History] Wi-Fi upload record failed:', e.message); }
         });
 
         writeStream.on('error', (err) => {
@@ -2227,8 +1573,9 @@ async function startWifiServer() {
 
     wifiServer.listen(wifiPort, () => {
       wifiActive = true;
+      wifiRetryCount = 0; // Reset retry counter once we successfully bind
       console.log(`[WiFi] Server listening at ${url}`);
-      resolve({ success: true, port: wifiPort, ip: localIp, qrCode: wifiQrDataUrl, sharedDir: wifiSharedDir });
+      resolve({ success: true, port: wifiPort, ip: localIp, qrCode: wifiQrDataUrl, sharedDir: wifiSharedDir, token: wifiToken });
     });
 
     wifiServer.on('error', (err) => {
@@ -2259,6 +1606,13 @@ function stopWifiServer() {
     wifiCleanupTimer = null;
   }
   wifiToken = '';
+  // Restore the saved port (or default to 8080) for the next session
+  try {
+    const saved = loadSettings();
+    wifiPort = (saved.wifiPort && Number.isInteger(saved.wifiPort) && saved.wifiPort >= 1024 && saved.wifiPort <= 65535) ? saved.wifiPort : 8080;
+  } catch (e) {
+    wifiPort = 8080;
+  }
   return new Promise((resolve) => {
     wifiServer.close(() => {
       wifiActive = false;

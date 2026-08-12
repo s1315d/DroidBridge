@@ -20,6 +20,8 @@
       <span id="connection-dot" class="status-dot disconnected"></span>
       <span id="connection-text">No Device</span>
     </div>
+    <button id="btn-history" class="titlebar-about-btn" title="Transfer History" style="-webkit-app-region: no-drag;">📋</button>
+    <button id="btn-settings" class="titlebar-about-btn" title="Settings" style="-webkit-app-region: no-drag;">⚙️</button>
     <button id="btn-about" class="titlebar-about-btn" title="About DroidBridge" style="-webkit-app-region: no-drag;">ℹ️</button>
   </div>
 
@@ -212,7 +214,15 @@
               <button id="btn-copy-wifi-url" class="copy-url-btn" title="Copy URL">📋</button>
             </div>
           </div>
-          
+
+          <div class="wifi-token-box">
+            <span class="token-label">Access Token (enter manually if QR unavailable):</span>
+            <div class="wifi-token-row">
+              <code id="wifi-token-text" class="wifi-token-code">—</code>
+              <button id="btn-copy-wifi-token" class="copy-url-btn" title="Copy Token">📋</button>
+            </div>
+          </div>
+
           <div class="wifi-folder-box">
             <span class="folder-label">Staging Folder on Mac:</span>
             <div class="wifi-folder-row">
@@ -248,6 +258,11 @@
       </div>
       <span id="progress-percent" class="progress-text">0%</span>
       <p id="progress-filename" class="progress-filename">Preparing...</p>
+      <p id="progress-speed-eta" class="progress-speed-eta"></p>
+      <div class="transfer-controls">
+        <button id="btn-pause-transfer" class="pause-transfer-btn" title="Pause / Resume the in-progress transfer">⏸ Pause</button>
+        <button id="btn-cancel-transfer" class="cancel-transfer-btn" title="Cancel the in-progress transfer">✕ Cancel Transfer</button>
+      </div>
     </div>
   </div>
 
@@ -269,7 +284,7 @@
       <button class="close-about-btn" id="btn-close-about">✕</button>
       <img src="icon.png" class="about-icon" alt="DroidBridge Icon">
       <h2 class="about-title">DroidBridge</h2>
-      <p class="about-version">Version 1.1.1</p>
+      <p class="about-version">Version 2.0.0</p>
       
       <div class="about-divider"></div>
       
@@ -331,6 +346,63 @@
           <button id="btn-cancel-delete-2" class="modal-btn secondary">Cancel</button>
           <button id="btn-confirm-delete-final" class="modal-btn danger">🗑️ Yes, Delete Permanently</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Overlay: Settings -->
+  <div id="settings-overlay" class="overlay">
+    <div class="overlay-content about-modal">
+      <button class="close-about-btn" id="btn-close-settings">✕</button>
+      <h2 class="about-title">⚙️ Settings</h2>
+      <div class="about-divider"></div>
+      <div class="settings-section">
+        <label class="settings-label">Update Repository (owner/repo on GitHub)</label>
+        <input type="text" id="settings-update-repo" class="settings-input" placeholder="e.g. shubhamgour/droidbridge" />
+      </div>
+      <div class="settings-section">
+        <label class="settings-label">Wi-Fi Server Port</label>
+        <input type="number" id="settings-wifi-port" class="settings-input" placeholder="8080" min="1024" max="65535" />
+      </div>
+      <div class="settings-actions">
+        <button id="btn-check-updates" class="modal-btn secondary">🔄 Check for Updates</button>
+        <button id="btn-save-settings" class="modal-btn">💾 Save Settings</button>
+      </div>
+      <div id="update-status" class="update-status"></div>
+    </div>
+  </div>
+
+  <!-- Overlay: Transfer History -->
+  <div id="history-overlay" class="overlay">
+    <div class="overlay-content about-modal history-modal">
+      <button class="close-about-btn" id="btn-close-history">✕</button>
+      <h2 class="about-title">📋 Transfer History</h2>
+      <div class="about-divider"></div>
+      <div class="history-toolbar">
+        <button id="btn-history-scale" class="history-scale-btn" title="Toggle compact / detailed view">📏 Compact</button>
+      </div>
+      <div id="history-list" class="history-list">
+        <div class="history-empty">No transfers yet.</div>
+      </div>
+      <div class="settings-actions">
+        <button id="btn-clear-history" class="modal-btn secondary">🗑️ Clear History</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rename / New Folder Input Modal -->
+  <div id="input-modal" class="overlay">
+    <div class="overlay-content about-modal" style="width: 400px;">
+      <button class="close-about-btn" id="btn-close-input-modal">✕</button>
+      <h2 class="about-title" id="input-modal-title">Rename</h2>
+      <div class="about-divider"></div>
+      <div class="settings-section">
+        <label class="settings-label" id="input-modal-label">New name:</label>
+        <input type="text" id="input-modal-field" class="settings-input" autocomplete="off" />
+      </div>
+      <div class="settings-actions">
+        <button id="btn-input-cancel" class="modal-btn secondary">Cancel</button>
+        <button id="btn-input-confirm" class="modal-btn">OK</button>
       </div>
     </div>
   </div>

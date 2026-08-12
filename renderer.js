@@ -122,7 +122,7 @@ function showToast(message, type = 'info') {
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
 
-  const icons = { success: '✓', error: '✗', info: 'ℹ' };
+  const icons = { success: '✓', error: '✗', warning: '⚠️', info: 'ℹ' };
   toast.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span><span class="toast-msg">${escapeHtml(message)}</span>`;
 
   // Position styles (in case CSS doesn't cover dynamic toasts)
@@ -142,7 +142,7 @@ function showToast(message, type = 'info') {
     opacity: '0',
     transform: 'translateY(12px)',
     transition: 'opacity 0.3s ease, transform 0.3s ease',
-    background: type === 'success' ? '#16a34a' : type === 'error' ? '#dc2626' : '#2563eb',
+    background: type === 'success' ? '#16a34a' : type === 'error' ? '#dc2626' : type === 'warning' ? '#d97706' : '#2563eb',
     boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
     maxWidth: '360px',
   });
@@ -167,6 +167,27 @@ function showToast(message, type = 'info') {
    OVERLAY / SCREEN HELPERS
    ====================================================================== */
 
+// Transfer timing state for speed / ETA estimation.
+// `progress.percent` from the main process is a smooth 0-100 value across the
+// entire batch (combining file index and within-file progress), so we derive
+// ETA from percent-over-time rather than byte counts.
+let transferStartTime = 0;
+let transferEtaEma = 0;
+
+function formatEta(seconds) {
+  if (!isFinite(seconds) || seconds < 0) return '';
+  if (seconds < 1) return '<1s';
+  if (seconds < 60) return Math.round(seconds) + 's';
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return `${m}m ${s}s`;
+  }
+  const h = Math.floor(seconds / 3600);
+  const mm = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${mm}m`;
+}
+
 function showScreen(id) {
   const el = document.getElementById(id);
   if (el) {
@@ -185,6 +206,9 @@ function hideScreen(id) {
 
 function setTransferOverlay(visible) {
   state.isTransferring = visible;
+  const etaEl = document.getElementById('progress-speed-eta');
+  const cancelBtn = document.getElementById('btn-cancel-transfer');
+  const pauseBtn = document.getElementById('btn-pause-transfer');
   if (visible) {
     showScreen('transfer-overlay');
     // Reset progress
@@ -194,6 +218,18 @@ function setTransferOverlay(visible) {
     if (fill) fill.style.width = '0%';
     if (pct) pct.textContent = '0%';
     if (fname) fname.textContent = '';
+    if (etaEl) etaEl.textContent = '';
+    if (cancelBtn) {
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = '✕ Cancel Transfer';
+    }
+    if (pauseBtn) {
+      pauseBtn.disabled = false;
+      pauseBtn.textContent = '⏸ Pause';
+      pauseBtn.classList.remove('paused');
+    }
+    transferStartTime = Date.now();
+    transferEtaEma = 0;
   } else {
     hideScreen('transfer-overlay');
   }
@@ -422,7 +458,25 @@ function renderRemoteFiles() {
   }
 }
 
-const thumbCache = new Map();
+const THUMB_CACHE_MAX = 200;
+const thumbCache = new Map(); // insertion order = LRU order (oldest first)
+
+function thumbCacheGet(key) {
+  if (!thumbCache.has(key)) return undefined;
+  const value = thumbCache.get(key);
+  thumbCache.delete(key); // move to end (most recently used)
+  thumbCache.set(key, value);
+  return value;
+}
+
+function thumbCacheSet(key, value) {
+  if (thumbCache.has(key)) thumbCache.delete(key);
+  thumbCache.set(key, value);
+  while (thumbCache.size > THUMB_CACHE_MAX) {
+    const oldestKey = thumbCache.keys().next().value;
+    thumbCache.delete(oldestKey);
+  }
+}
 
 /**
  * Render a list of files into the given container.
@@ -431,10 +485,60 @@ const thumbCache = new Map();
  * @param {Set} selectionSet
  * @param {'local'|'remote'} side
  */
-function renderFileList(container, files, selectionSet, side) {
-  container.innerHTML = '';
+/* ======================================================================
+   VIRTUAL SCROLL FILE LIST RENDERING (#10)
+   Only renders DOM elements for the visible rows + a small buffer,
+   using spacer divs to maintain correct scroll height. This keeps
+   the UI responsive even with 1000+ files in a directory.
+   ====================================================================== */
 
-  if (files.length === 0) {
+const VIRTUAL_ROW_HEIGHT = 40;
+const VIRTUAL_BUFFER = 8;
+
+const virtualState = {
+  local: { files: [], selectionSet: null, container: null },
+  remote: { files: [], selectionSet: null, container: null },
+};
+
+let pendingScrollIndex = { local: null, remote: null };
+
+/**
+ * Store the file list + selection state and render the visible rows.
+ */
+function renderFileList(container, files, selectionSet, side) {
+  virtualState[side] = { files, selectionSet, container };
+  renderVisibleRows(side);
+}
+
+/**
+ * Render only the rows visible in the current scroll viewport (+ buffer),
+ * with top/bottom spacer divs to maintain the full scroll height.
+ */
+function renderVisibleRows(side) {
+  const vs = virtualState[side];
+  if (!vs || !vs.container) return;
+  const container = vs.container;
+  const files = vs.files;
+  const selectionSet = vs.selectionSet;
+  const total = files.length;
+
+  // Handle pending scroll request (arrow key navigation): ensure the
+  // target row is within the viewport before computing visible range.
+  if (pendingScrollIndex[side] !== null && pendingScrollIndex[side] >= 0) {
+    const idx = pendingScrollIndex[side];
+    const targetTop = idx * VIRTUAL_ROW_HEIGHT;
+    const scrollTop = container.scrollTop;
+    const viewportBottom = scrollTop + container.clientHeight;
+    if (targetTop < scrollTop) {
+      container.scrollTop = targetTop;
+    } else if (targetTop + VIRTUAL_ROW_HEIGHT > viewportBottom) {
+      container.scrollTop = targetTop + VIRTUAL_ROW_HEIGHT - container.clientHeight;
+    }
+    pendingScrollIndex[side] = null;
+  }
+
+  if (total === 0) {
+    container.innerHTML = '';
     const empty = document.createElement('div');
     empty.className = 'empty-dir';
     empty.textContent = 'This folder is empty';
@@ -442,33 +546,82 @@ function renderFileList(container, files, selectionSet, side) {
     return;
   }
 
-  files.forEach((file, index) => {
-    const item = document.createElement('div');
-    item.className = 'file-item' + (selectionSet.has(file.fullPath) ? ' selected' : '');
-    item.dataset.index = index;
-    item.dataset.fullPath = file.fullPath;
+  const scrollTop = container.scrollTop;
+  const containerHeight = container.clientHeight;
+  const startIndex = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_BUFFER);
+  const endIndex = Math.min(total, Math.ceil((scrollTop + containerHeight) / VIRTUAL_ROW_HEIGHT) + VIRTUAL_BUFFER);
 
-    const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
-    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
-    const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+  container.innerHTML = '';
 
-    // Column 1: Icon
-    const icon = document.createElement('span');
-    icon.className = 'file-icon';
-    icon.textContent = getFileIcon(file);
+  // Top spacer
+  if (startIndex > 0) {
+    const topSpacer = document.createElement('div');
+    topSpacer.className = 'virtual-spacer';
+    topSpacer.style.height = (startIndex * VIRTUAL_ROW_HEIGHT) + 'px';
+    container.appendChild(topSpacer);
+  }
 
-    // Asynchronously upgrade file icon to real thumbnail for photos/videos
-    if (!file.isDirectory && (imageExts.includes(ext) || videoExts.includes(ext))) {
-      if (thumbCache.has(file.fullPath)) {
-        const img = document.createElement('img');
-        img.className = 'file-list-thumb';
-        img.src = thumbCache.get(file.fullPath);
-        icon.innerHTML = '';
-        icon.appendChild(img);
-      } else if ((side === 'local' && state.localSource === 'mac') || (side === 'remote' && state.remoteSource === 'mac')) {
-        queueLocalThumbnail(file.fullPath, (thumbDataUrl) => {
+  // Visible rows
+  for (let i = startIndex; i < endIndex; i++) {
+    const item = createFileItem(files[i], i, side, selectionSet);
+    container.appendChild(item);
+  }
+
+  // Bottom spacer
+  if (endIndex < total) {
+    const bottomSpacer = document.createElement('div');
+    bottomSpacer.className = 'virtual-spacer';
+    bottomSpacer.style.height = ((total - endIndex) * VIRTUAL_ROW_HEIGHT) + 'px';
+    container.appendChild(bottomSpacer);
+  }
+}
+
+/**
+ * Create a single file-item DOM element with all columns, icons, and
+ * event handlers. Extracted from the original renderFileList forEach body.
+ */
+function createFileItem(file, index, side, selectionSet) {
+  const item = document.createElement('div');
+  item.className = 'file-item' + (selectionSet.has(file.fullPath) ? ' selected' : '');
+  item.dataset.index = index;
+  item.dataset.fullPath = file.fullPath;
+
+  const ext = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
+  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
+  const videoExts = ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'];
+
+  // Column 1: Icon
+  const icon = document.createElement('span');
+  icon.className = 'file-icon';
+  icon.textContent = getFileIcon(file);
+
+  // Asynchronously upgrade file icon to real thumbnail for photos/videos
+  if (!file.isDirectory && (imageExts.includes(ext) || videoExts.includes(ext))) {
+    const cached = thumbCacheGet(file.fullPath);
+    if (cached) {
+      const img = document.createElement('img');
+      img.className = 'file-list-thumb';
+      img.src = cached;
+      icon.innerHTML = '';
+      icon.appendChild(img);
+    } else if ((side === 'local' && state.localSource === 'mac') || (side === 'remote' && state.remoteSource === 'mac')) {
+      queueLocalThumbnail(file.fullPath, (thumbDataUrl) => {
+        if (thumbDataUrl) {
+          thumbCacheSet(file.fullPath, thumbDataUrl);
+          const img = document.createElement('img');
+          img.className = 'file-list-thumb';
+          img.src = thumbDataUrl;
+          img.onerror = () => {};
+          icon.innerHTML = '';
+          icon.appendChild(img);
+        }
+      });
+    } else {
+      const deviceId = side === 'local' ? state.localSource : state.remoteSource;
+      if (deviceId && deviceId !== 'mac') {
+        queueRemoteThumbnail(deviceId, file.fullPath, (thumbDataUrl) => {
           if (thumbDataUrl) {
-            thumbCache.set(file.fullPath, thumbDataUrl);
+            thumbCacheSet(file.fullPath, thumbDataUrl);
             const img = document.createElement('img');
             img.className = 'file-list-thumb';
             img.src = thumbDataUrl;
@@ -477,183 +630,171 @@ function renderFileList(container, files, selectionSet, side) {
             icon.appendChild(img);
           }
         });
-      } else {
-        const deviceId = side === 'local' ? state.localSource : state.remoteSource;
-        if (deviceId && deviceId !== 'mac') {
-          queueRemoteThumbnail(deviceId, file.fullPath, (thumbDataUrl) => {
-            if (thumbDataUrl) {
-              thumbCache.set(file.fullPath, thumbDataUrl);
-              const img = document.createElement('img');
-              img.className = 'file-list-thumb';
-              img.src = thumbDataUrl;
-              img.onerror = () => {};
-              icon.innerHTML = '';
-              icon.appendChild(img);
-            }
-          });
-        }
       }
     }
+  }
 
-    // Column 2: Name
-    const nameContainer = document.createElement('div');
-    nameContainer.className = 'file-name-container';
+  // Column 2: Name
+  const nameContainer = document.createElement('div');
+  nameContainer.className = 'file-name-container';
 
-    const name = document.createElement('span');
-    name.className = 'file-name';
-    name.textContent = file.name;
-    name.title = file.name;
-    nameContainer.appendChild(name);
+  const name = document.createElement('span');
+  name.className = 'file-name';
+  name.textContent = file.name;
+  name.title = file.name;
+  nameContainer.appendChild(name);
 
-    // Add hover preview button for photos/videos
-    if (!file.isDirectory && (imageExts.includes(ext) || videoExts.includes(ext))) {
-      const prevBtn = document.createElement('button');
-      prevBtn.className = 'file-preview-hover-btn';
-      prevBtn.textContent = '👁️ Preview';
-      prevBtn.title = 'Preview media file';
-      prevBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openFilePreview(file, side);
-      });
-      nameContainer.appendChild(prevBtn);
-    }
-
-    // Comparison Badge
-    if (state.comparisonActive) {
-      const otherFiles = side === 'local' ? state.remoteFiles : state.localFiles;
-      const match = otherFiles.find((f) => f.name.toLowerCase() === file.name.toLowerCase());
-      const compBadge = document.createElement('span');
-      compBadge.className = 'comp-badge';
-
-      if (match) {
-        if (file.isDirectory !== match.isDirectory) {
-          compBadge.textContent = 'Type Diff';
-          compBadge.classList.add('comp-diff');
-        } else if (file.isDirectory && match.isDirectory) {
-          if (file.itemCount !== undefined && match.itemCount !== undefined) {
-            if (file.itemCount === match.itemCount) {
-              compBadge.textContent = `Match (${file.itemCount} items)`;
-              compBadge.classList.add('comp-match');
-            } else {
-              compBadge.textContent = `Count Diff (${file.itemCount} vs ${match.itemCount})`;
-              compBadge.classList.add('comp-diff');
-            }
-          } else if (file.size === match.size) {
-            compBadge.textContent = 'Match';
-            compBadge.classList.add('comp-match');
-          } else {
-            compBadge.textContent = 'Size Diff';
-            compBadge.classList.add('comp-diff');
-          }
-        } else {
-          if (file.size === match.size) {
-            compBadge.textContent = 'Match';
-            compBadge.classList.add('comp-match');
-          } else {
-            compBadge.textContent = 'Size Diff';
-            compBadge.classList.add('comp-diff');
-          }
-        }
-      } else {
-        compBadge.textContent = 'Unique';
-        compBadge.classList.add('comp-unique');
-      }
-      nameContainer.appendChild(compBadge);
-    }
-
-    // Column 3: Kind
-    const kind = document.createElement('span');
-    kind.className = 'file-kind';
-    kind.textContent = getFileKind(file);
-    kind.title = kind.textContent;
-
-    // Column 4: Size
-    const size = document.createElement('span');
-    size.className = 'file-size';
-    size.textContent = file.isDirectory ? '—' : formatFileSize(file.size);
-
-    // Column 5: Date
-    const date = document.createElement('span');
-    date.className = 'file-date';
-    date.textContent = formatDate(file.modified);
-
-    // Column 6: Actions (Right-Side Checkbox + Dustbin Delete Button)
-    const actionsCol = document.createElement('div');
-    actionsCol.className = 'col-actions';
-
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.className = 'file-checkbox';
-    checkbox.checked = selectionSet.has(file.fullPath);
-    checkbox.title = 'Select file';
-    checkbox.addEventListener('click', (e) => {
+  // Add hover preview button for photos/videos
+  if (!file.isDirectory && (imageExts.includes(ext) || videoExts.includes(ext))) {
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'file-preview-hover-btn';
+    prevBtn.textContent = '👁️ Preview';
+    prevBtn.title = 'Preview media file';
+    prevBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (checkbox.checked) {
-        selectionSet.add(file.fullPath);
+      openFilePreview(file, side);
+    });
+    nameContainer.appendChild(prevBtn);
+  }
+
+  // Comparison Badge
+  if (state.comparisonActive) {
+    const otherFiles = side === 'local' ? state.remoteFiles : state.localFiles;
+    const match = otherFiles.find((f) => f.name.toLowerCase() === file.name.toLowerCase());
+    const compBadge = document.createElement('span');
+    compBadge.className = 'comp-badge';
+
+    if (match) {
+      if (file.isDirectory !== match.isDirectory) {
+        compBadge.textContent = 'Type Diff';
+        compBadge.classList.add('comp-diff');
+      } else if (file.isDirectory && match.isDirectory) {
+        if (file.itemCount !== undefined && match.itemCount !== undefined) {
+          if (file.itemCount === match.itemCount) {
+            compBadge.textContent = `Match (${file.itemCount} items)`;
+            compBadge.classList.add('comp-match');
+          } else {
+            compBadge.textContent = `Count Diff (${file.itemCount} vs ${match.itemCount})`;
+            compBadge.classList.add('comp-diff');
+          }
+        } else if (file.size === match.size) {
+          compBadge.textContent = 'Match';
+          compBadge.classList.add('comp-match');
+        } else {
+          compBadge.textContent = 'Size Diff';
+          compBadge.classList.add('comp-diff');
+        }
       } else {
-        selectionSet.delete(file.fullPath);
+        if (file.size === match.size) {
+          compBadge.textContent = 'Match';
+          compBadge.classList.add('comp-match');
+        } else {
+          compBadge.textContent = 'Size Diff';
+          compBadge.classList.add('comp-diff');
+        }
       }
+    } else {
+      compBadge.textContent = 'Unique';
+      compBadge.classList.add('comp-unique');
+    }
+    nameContainer.appendChild(compBadge);
+  }
+
+  // Column 3: Kind
+  const kind = document.createElement('span');
+  kind.className = 'file-kind';
+  kind.textContent = getFileKind(file);
+  kind.title = kind.textContent;
+
+  // Column 4: Size
+  const size = document.createElement('span');
+  size.className = 'file-size';
+  size.textContent = file.isDirectory ? '—' : formatFileSize(file.size);
+
+  // Column 5: Date
+  const date = document.createElement('span');
+  date.className = 'file-date';
+  date.textContent = formatDate(file.modified);
+
+  // Column 6: Actions (Checkbox + Delete Button)
+  const actionsCol = document.createElement('div');
+  actionsCol.className = 'col-actions';
+
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'file-checkbox';
+  checkbox.checked = selectionSet.has(file.fullPath);
+  checkbox.title = 'Select file';
+  checkbox.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (checkbox.checked) {
+      selectionSet.add(file.fullPath);
+    } else {
+      selectionSet.delete(file.fullPath);
+    }
+    if (side === 'local') renderLocalFiles();
+    else renderRemoteFiles();
+    updateTransferButtons();
+  });
+
+  const rowDelBtn = document.createElement('button');
+  rowDelBtn.className = 'file-row-delete-btn';
+  rowDelBtn.textContent = '🗑️';
+  rowDelBtn.title = `Delete ${file.name}`;
+  rowDelBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    requestDeleteFiles([file], side);
+  });
+
+  actionsCol.appendChild(checkbox);
+  actionsCol.appendChild(rowDelBtn);
+
+  item.appendChild(icon);
+  item.appendChild(nameContainer);
+  item.appendChild(kind);
+  item.appendChild(size);
+  item.appendChild(date);
+  item.appendChild(actionsCol);
+
+  // --- Event Handlers ---
+
+  // Single click — selection
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    handleFileClick(file, index, e, side);
+  });
+
+  // Double click — navigate into directories OR preview files
+  item.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    if (file.isDirectory || file.isSymlink) {
+      if (side === 'local') {
+        loadLocalFiles(file.fullPath);
+      } else {
+        loadRemoteFiles(file.fullPath);
+      }
+    } else {
+      openFilePreview(file, side);
+    }
+  });
+
+  // Right-click — context menu
+  item.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!selectionSet.has(file.fullPath)) {
+      selectionSet.clear();
+      selectionSet.add(file.fullPath);
       if (side === 'local') renderLocalFiles();
       else renderRemoteFiles();
-      updateTransferButtons();
-    });
-
-    const rowDelBtn = document.createElement('button');
-    rowDelBtn.className = 'file-row-delete-btn';
-    rowDelBtn.textContent = '🗑️';
-    rowDelBtn.title = `Delete ${file.name}`;
-    rowDelBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      requestDeleteFiles([file], side);
-    });
-
-    actionsCol.appendChild(checkbox);
-    actionsCol.appendChild(rowDelBtn);
-
-    item.appendChild(icon);
-    item.appendChild(nameContainer);
-    item.appendChild(kind);
-    item.appendChild(size);
-    item.appendChild(date);
-    item.appendChild(actionsCol);
-
-    // --- Event Handlers ---
-
-    // Single click — selection
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      handleFileClick(file, index, e, side);
-    });
-
-    // Double click — navigate into directories OR preview files
-    item.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
-      if (file.isDirectory || file.isSymlink) {
-        if (side === 'local') {
-          loadLocalFiles(file.fullPath);
-        } else {
-          loadRemoteFiles(file.fullPath);
-        }
-      } else {
-        openFilePreview(file, side);
-      }
-    });
-
-    // Right-click — context menu
-    item.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (!selectionSet.has(file.fullPath)) {
-        selectionSet.clear();
-        selectionSet.add(file.fullPath);
-        if (side === 'local') renderLocalFiles();
-        else renderRemoteFiles();
-      }
-      showContextMenu(e, file, side);
-    });
-
-    container.appendChild(item);
+    }
+    showContextMenu(e, file, side);
   });
+
+  // Drag-and-drop support (#15)
+  if (window.__makeDraggable) window.__makeDraggable(item, side);
+
+  return item;
 }
 
 /* ======================================================================
@@ -846,7 +987,9 @@ async function transferToPhone() {
 
     setTransferOverlay(false);
 
-    if (result && result.success) {
+    if (result && result.cancelled) {
+      showToast(`Transfer cancelled — ${result.transferred} file(s) transferred`, 'info');
+    } else if (result && result.success) {
       showToast(`Transferred ${result.transferred} file(s) to ${rightName}`, 'success');
     } else if (result) {
       const errMsg = formatTransferError(result.errors, 'Transfer failed');
@@ -906,7 +1049,9 @@ async function transferToMac() {
 
     setTransferOverlay(false);
 
-    if (result && result.success) {
+    if (result && result.cancelled) {
+      showToast(`Transfer cancelled — ${result.transferred} file(s) transferred`, 'info');
+    } else if (result && result.success) {
       showToast(`Transferred ${result.transferred} file(s) to ${leftName}`, 'success');
     } else if (result) {
       const errMsg = formatTransferError(result.errors, 'Transfer failed');
@@ -940,6 +1085,10 @@ async function executePhoneToPhoneTransfer(srcDeviceId, destDeviceId, srcPaths, 
 
     if (progressFilename) progressFilename.textContent = 'Phase 1/2: Copying files from source phone to Mac temp...';
     const pullResult = await window.droidBridge.pullFiles(srcDeviceId, srcPaths, tempDir);
+    if (pullResult.cancelled) {
+      showToast(`Transfer cancelled — ${pullResult.transferred} file(s) transferred`, 'info');
+      return;
+    }
     if (!pullResult.success) {
       const firstError = formatTransferError(pullResult.errors, 'Pull to temp folder failed');
       throw new Error(firstError);
@@ -955,6 +1104,10 @@ async function executePhoneToPhoneTransfer(srcDeviceId, destDeviceId, srcPaths, 
     });
 
     const pushResult = await window.droidBridge.pushFiles(destDeviceId, localPathsToPush, destPath);
+    if (pushResult.cancelled) {
+      showToast(`Transfer cancelled — ${pushResult.transferred} file(s) transferred`, 'info');
+      return;
+    }
     if (!pushResult.success) {
       const firstError = formatTransferError(pushResult.errors, 'Push to destination failed');
       throw new Error(firstError);
@@ -1023,6 +1176,7 @@ function showContextMenu(event, file, side) {
     if (!file.isDirectory) {
       addItem('👁️ Preview File', () => openFilePreview(file, side));
     }
+    addItem('✏️ Rename', () => promptRename(file, side));
     addItem('Open in Finder', () => {
       if (state.localSource === 'mac') {
         window.droidBridge.openInFinder(file.fullPath);
@@ -1040,6 +1194,7 @@ function showContextMenu(event, file, side) {
     if (!file.isDirectory) {
       addItem('👁️ Preview File', () => openFilePreview(file, side));
     }
+    addItem('✏️ Rename', () => promptRename(file, side));
     if (state.localSource !== state.remoteSource) {
       addItem(`Transfer to ${leftName}`, () => transferToMac());
     }
@@ -1304,10 +1459,94 @@ async function executePendingDelete() {
   }
 }
 
-function promptNewRemoteFolder() {
-  const name = prompt('New folder name:');
+async function promptNewRemoteFolder() {
+  const name = await showInputModal('New Folder', 'Folder name:', '');
   if (!name || !name.trim()) return;
   createRemoteFolder(name.trim());
+}
+
+async function promptRename(file, side) {
+  if (!file) return;
+  const newName = await showInputModal('Rename', 'New name:', file.name);
+  if (!newName || !newName.trim() || newName.trim() === file.name) return;
+  const trimmed = newName.trim();
+  try {
+    let result;
+    const isMac = (side === 'local' && state.localSource === 'mac') || (side === 'remote' && state.remoteSource === 'mac');
+    if (isMac) {
+      result = await window.droidBridge.renameLocal(file.fullPath, trimmed);
+    } else {
+      const deviceId = side === 'local' ? state.localSource : state.remoteSource;
+      result = await window.droidBridge.renameRemote(deviceId, file.fullPath, trimmed);
+    }
+    if (result.success) {
+      showToast(`Renamed to "${trimmed}"`, 'success');
+      if (side === 'local') await loadLocalFiles(state.localPath);
+      else await loadRemoteFiles(state.remotePath);
+    } else {
+      showToast('Rename failed: ' + (result.error || 'unknown error'), 'error');
+    }
+  } catch (err) {
+    showToast('Rename failed: ' + (err.message || err), 'error');
+  }
+}
+
+/* ======================================================================
+   SHARED INPUT MODAL (replaces window.prompt which is disabled in Electron)
+   ====================================================================== */
+
+let _inputModalResolve = null;
+
+function showInputModal(title, label, defaultValue) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('input-modal');
+    const titleEl = document.getElementById('input-modal-title');
+    const labelEl = document.getElementById('input-modal-label');
+    const field = document.getElementById('input-modal-field');
+    const btnConfirm = document.getElementById('btn-input-confirm');
+    const btnCancel = document.getElementById('btn-input-cancel');
+    const btnClose = document.getElementById('btn-close-input-modal');
+
+    if (!overlay || !field) { resolve(null); return; }
+
+    if (titleEl) titleEl.textContent = title || 'Input';
+    if (labelEl) labelEl.textContent = label || '';
+    field.value = defaultValue || '';
+
+    _inputModalResolve = resolve;
+    overlay.style.display = 'flex';
+
+    // Focus + select after the modal is visible
+    setTimeout(() => { field.focus(); field.select(); }, 50);
+
+    // Clean up previous listeners by cloning
+    const newConfirm = btnConfirm.cloneNode(true);
+    const newCancel = btnCancel.cloneNode(true);
+    const newClose = btnClose.cloneNode(true);
+    btnConfirm.replaceWith(newConfirm);
+    btnCancel.replaceWith(newCancel);
+    btnClose.replaceWith(newClose);
+
+    function close(value) {
+      overlay.style.display = 'none';
+      _inputModalResolve = null;
+      newConfirm.replaceWith(newConfirm); // no-op, just keep ref
+      resolve(value);
+    }
+
+    newConfirm.addEventListener('click', () => close(field.value));
+    newCancel.addEventListener('click', () => close(null));
+    newClose.addEventListener('click', () => close(null));
+
+    field.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); close(field.value); }
+      if (e.key === 'Escape') { e.preventDefault(); close(null); }
+    };
+
+    overlay.onclick = (e) => {
+      if (e.target === overlay) close(null);
+    };
+  });
 }
 
 async function createRemoteFolder(name) {
@@ -1379,6 +1618,10 @@ async function loadLocalFiles(dirPath) {
     renderLocalFiles();
     renderLocalBreadcrumb();
     updateTransferButtons();
+    // Persist last local path (#17)
+    if (state.localSource === 'mac' && window.droidBridge.setSettings) {
+      window.droidBridge.setSettings({ lastLocalPath: state.localPath }).catch(() => {});
+    }
   } catch (err) {
     showToast('Failed to list files: ' + (err.message || err), 'error');
     console.error('loadLocalFiles error:', err);
@@ -1491,6 +1734,10 @@ async function loadRemoteFiles(dirPath) {
     renderRemoteFiles();
     renderRemoteBreadcrumb();
     updateTransferButtons();
+    // Persist last remote path (#17)
+    if (state.remoteSource !== 'mac' && window.droidBridge.setSettings) {
+      window.droidBridge.setSettings({ lastRemotePath: state.remotePath }).catch(() => {});
+    }
   } catch (err) {
     showToast('Failed to list files: ' + (err.message || err), 'error');
     console.error('loadRemoteFiles error:', err);
@@ -1529,6 +1776,7 @@ async function refreshDevicesList() {
           androidVersion: '',
           status: dev.status
         });
+        showToast('USB Debugging not authorized. Check your phone for the "Allow USB debugging?" prompt and tap Allow.', 'warning');
       }
     }
 
@@ -1569,11 +1817,16 @@ async function refreshDevicesList() {
         btnStartUsbTransfer.title = 'Click to open USB File Manager';
       }
       if (usbStatusHint) {
-        const devText = state.devices.length > 1 
-          ? 'Multiple Android devices' 
-          : (state.devices[0]?.model || 'Android Phone');
-        const devName = escapeHtml(devText);
-        usbStatusHint.innerHTML = `✅ <strong>${devName} connected via USB!</strong> Click ⚡ Continue with USB Transfer or Wi-Fi mode`;
+        const hasUnauthorized = state.devices.some(d => d.status === 'unauthorized');
+        if (hasUnauthorized) {
+          usbStatusHint.innerHTML = '⚠️ <strong>USB Debugging not authorized.</strong> Look for the "Allow USB debugging?" dialog on your phone, check "Always allow from this computer", and tap <strong>Allow</strong>. Then reconnect the USB cable.';
+        } else {
+          const devText = state.devices.length > 1 
+            ? 'Multiple Android devices' 
+            : (state.devices[0]?.model || 'Android Phone');
+          const devName = escapeHtml(devText);
+          usbStatusHint.innerHTML = `✅ <strong>${devName} connected via USB!</strong> Click ⚡ Continue with USB Transfer or Wi-Fi mode`;
+        }
       }
     }
 
@@ -1701,13 +1954,33 @@ function handleTransferProgress(progress) {
   const fill = document.querySelector('#transfer-overlay .progress-bar-fill');
   const pct = document.getElementById('progress-percent');
   const fname = document.getElementById('progress-filename');
+  const etaEl = document.getElementById('progress-speed-eta');
 
-  if (fill) fill.style.width = (progress.percent || 0) + '%';
-  if (pct) pct.textContent = (progress.percent || 0) + '%';
+  const percent = Math.max(0, Math.min(100, progress.percent || 0));
+  if (fill) fill.style.width = percent + '%';
+  if (pct) pct.textContent = percent + '%';
   if (fname) {
     const fileLabel = progress.fileName || '';
     const progressLabel = (progress.total > 1 && progress.current) ? ` (${progress.current}/${progress.total})` : '';
     fname.textContent = fileLabel + progressLabel;
+  }
+
+  // Speed / ETA estimation from the smooth overall percent value.
+  if (etaEl) {
+    if (percent >= 100) {
+      const elapsed = (Date.now() - transferStartTime) / 1000;
+      etaEl.textContent = `Completed in ${formatEta(elapsed)}`;
+    } else if (percent > 0 && transferStartTime > 0) {
+      const elapsed = (Date.now() - transferStartTime) / 1000;
+      if (elapsed > 0.5) {
+        const rate = percent / elapsed;        // percent per second
+        const remaining = 100 - percent;
+        const eta = remaining / rate;            // seconds
+        // Exponential moving average to smooth jitter as files start/finish.
+        transferEtaEma = transferEtaEma === 0 ? eta : transferEtaEma * 0.7 + eta * 0.3;
+        etaEl.textContent = `~${formatEta(transferEtaEma)} remaining`;
+      }
+    }
   }
 }
 
@@ -1849,13 +2122,15 @@ function setupKeyboard() {
       }
 
       if (side === 'local') {
+        pendingScrollIndex.local = nextIndex;
         renderLocalFiles();
       } else {
+        pendingScrollIndex.remote = nextIndex;
         renderRemoteFiles();
       }
       updateTransferButtons();
 
-      // Scroll the selected item into view
+      // Scroll the selected item into view (fine-tune after virtual render)
       setTimeout(() => {
         const listContainer = document.getElementById(`${side}-file-list`);
         if (listContainer) {
@@ -1916,6 +2191,54 @@ function setupGlobalHandlers() {
   const toMac = document.getElementById('btn-to-mac');
   if (toPhone) toPhone.addEventListener('click', () => transferToPhone());
   if (toMac) toMac.addEventListener('click', () => transferToMac());
+
+  // Cancel transfer button
+  const btnCancelTransfer = document.getElementById('btn-cancel-transfer');
+  if (btnCancelTransfer) {
+    btnCancelTransfer.addEventListener('click', async () => {
+      btnCancelTransfer.disabled = true;
+      btnCancelTransfer.textContent = 'Cancelling...';
+      const etaEl = document.getElementById('progress-speed-eta');
+      if (etaEl) etaEl.textContent = 'Cancelling...';
+      try {
+        await window.droidBridge.cancelTransfer();
+      } catch (err) {
+        console.error('Cancel transfer failed:', err);
+      }
+    });
+  }
+
+  // Pause / Resume transfer button
+  const btnPauseTransfer = document.getElementById('btn-pause-transfer');
+  let transferPaused = false;
+  if (btnPauseTransfer) {
+    btnPauseTransfer.addEventListener('click', async () => {
+      try {
+        if (!transferPaused) {
+          const result = await window.droidBridge.pauseTransfer();
+          if (result && result.success) {
+            transferPaused = true;
+            btnPauseTransfer.textContent = '▶ Resume';
+            btnPauseTransfer.classList.add('paused');
+            const etaEl = document.getElementById('progress-speed-eta');
+            if (etaEl) etaEl.textContent = '⏸ Paused';
+          }
+        } else {
+          const result = await window.droidBridge.resumeTransfer();
+          if (result && result.success) {
+            transferPaused = false;
+            btnPauseTransfer.textContent = '⏸ Pause';
+            btnPauseTransfer.classList.remove('paused');
+            const etaEl = document.getElementById('progress-speed-eta');
+            if (etaEl) etaEl.textContent = '';
+            transferStartTime = Date.now() - (transferEtaEma * 1000); // adjust start time
+          }
+        }
+      } catch (err) {
+        console.error('Pause/resume failed:', err);
+      }
+    });
+  }
 
   // Delete buttons
   const btnDeleteLocal = document.getElementById('btn-delete-local');
@@ -2085,6 +2408,7 @@ function setupGlobalHandlers() {
   const btnStartWifiSetup = document.getElementById('btn-start-wifi-setup');
   const btnStopWifi = document.getElementById('btn-stop-wifi');
   const btnCopyWifiUrl = document.getElementById('btn-copy-wifi-url');
+  const btnCopyWifiToken = document.getElementById('btn-copy-wifi-token');
   const btnOpenWifiDir = document.getElementById('btn-open-wifi-dir');
 
   if (btnStartWifiSetup) {
@@ -2094,16 +2418,19 @@ function setupGlobalHandlers() {
         if (result && result.success) {
           const qrImg = document.getElementById('wifi-qr-code');
           const urlInput = document.getElementById('wifi-url-text');
+          const tokenText = document.getElementById('wifi-token-text');
           const sharedPath = document.getElementById('wifi-shared-path');
 
           if (qrImg) qrImg.src = result.qrCode;
           if (urlInput) urlInput.value = `http://${result.ip}:${result.port}/?token=${result.token}`;
+          if (tokenText) tokenText.textContent = result.token || '—';
           if (sharedPath) {
             sharedPath.textContent = result.sharedDir;
             sharedPath.title = result.sharedDir;
           }
           state.wifiSharedDir = result.sharedDir;
           state.wifiPort = result.port;
+          state.wifiToken = result.token;
           hideScreen('no-device-screen');
           showScreen('wifi-transfer-screen');
 
@@ -2162,11 +2489,49 @@ function setupGlobalHandlers() {
   }
 
   if (btnCopyWifiUrl) {
-    btnCopyWifiUrl.addEventListener('click', () => {
+    btnCopyWifiUrl.addEventListener('click', async () => {
       const urlInput = document.getElementById('wifi-url-text');
       if (urlInput) {
-        navigator.clipboard.writeText(urlInput.value);
-        showToast('Link copied to clipboard!', 'success');
+        const text = urlInput.value;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+          } else if (window.droidBridge.copyToClipboard) {
+            await window.droidBridge.copyToClipboard(text);
+          }
+          showToast('Link copied to clipboard!', 'success');
+        } catch (err) {
+          if (window.droidBridge.copyToClipboard) {
+            await window.droidBridge.copyToClipboard(text);
+            showToast('Link copied to clipboard!', 'success');
+          } else {
+            showToast('Copy failed', 'error');
+          }
+        }
+      }
+    });
+  }
+
+  if (btnCopyWifiToken) {
+    btnCopyWifiToken.addEventListener('click', async () => {
+      const tokenText = document.getElementById('wifi-token-text');
+      const token = tokenText ? tokenText.textContent : '';
+      if (token && token !== '—') {
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(token);
+          } else if (window.droidBridge.copyToClipboard) {
+            await window.droidBridge.copyToClipboard(token);
+          }
+          showToast('Access token copied to clipboard!', 'success');
+        } catch (err) {
+          if (window.droidBridge.copyToClipboard) {
+            await window.droidBridge.copyToClipboard(token);
+            showToast('Access token copied to clipboard!', 'success');
+          } else {
+            showToast('Copy failed', 'error');
+          }
+        }
       }
     });
   }
@@ -2187,6 +2552,141 @@ function setupGlobalHandlers() {
       window.droidBridge.openWifiSharedDir();
     });
   }
+
+  // --- Settings modal (#18) ---
+  const btnSettings = document.getElementById('btn-settings');
+  const btnCloseSettings = document.getElementById('btn-close-settings');
+  const btnSaveSettings = document.getElementById('btn-save-settings');
+  const btnCheckUpdates = document.getElementById('btn-check-updates');
+  const settingsOverlay = document.getElementById('settings-overlay');
+
+  if (btnSettings) {
+    btnSettings.addEventListener('click', async () => {
+      const s = await window.droidBridge.getSettings();
+      const repoInput = document.getElementById('settings-update-repo');
+      const portInput = document.getElementById('settings-wifi-port');
+      if (repoInput) repoInput.value = s.updateRepo || '';
+      if (portInput) portInput.value = s.wifiPort || '';
+      const updateStatus = document.getElementById('update-status');
+      if (updateStatus) updateStatus.textContent = '';
+      if (settingsOverlay) settingsOverlay.style.display = 'flex';
+    });
+  }
+  if (btnCloseSettings) {
+    btnCloseSettings.addEventListener('click', () => {
+      if (settingsOverlay) settingsOverlay.style.display = 'none';
+    });
+  }
+  if (settingsOverlay) {
+    settingsOverlay.addEventListener('click', (e) => {
+      if (e.target === settingsOverlay) settingsOverlay.style.display = 'none';
+    });
+  }
+  if (btnSaveSettings) {
+    btnSaveSettings.addEventListener('click', async () => {
+      const repoInput = document.getElementById('settings-update-repo');
+      const portInput = document.getElementById('settings-wifi-port');
+      const partial = {};
+      if (repoInput) partial.updateRepo = repoInput.value.trim();
+      if (portInput && portInput.value) partial.wifiPort = parseInt(portInput.value, 10);
+      await window.droidBridge.setSettings(partial);
+      showToast('Settings saved', 'success');
+    });
+  }
+  if (btnCheckUpdates) {
+    btnCheckUpdates.addEventListener('click', async () => {
+      const updateStatus = document.getElementById('update-status');
+      if (updateStatus) {
+        updateStatus.textContent = 'Checking for updates...';
+        updateStatus.className = 'update-status';
+      }
+      try {
+        const result = await window.droidBridge.checkForUpdates();
+        if (!result.success) {
+          if (updateStatus) {
+            updateStatus.textContent = result.error || 'Failed to check for updates';
+            updateStatus.className = 'update-status error';
+          }
+          return;
+        }
+        if (result.hasUpdate) {
+          if (updateStatus) {
+            updateStatus.innerHTML = `New version ${result.latestVersion} available! (Current: ${result.currentVersion})<br><a href="${result.downloadUrl}" target="_blank" style="color: var(--primary-light);">View release →</a>`;
+            updateStatus.className = 'update-status has-update';
+          }
+        } else {
+          if (updateStatus) {
+            updateStatus.textContent = `You're up to date! (v${result.currentVersion})`;
+            updateStatus.className = 'update-status up-to-date';
+          }
+        }
+      } catch (err) {
+        if (updateStatus) {
+          updateStatus.textContent = 'Error: ' + (err.message || err);
+          updateStatus.className = 'update-status error';
+        }
+      }
+    });
+  }
+
+  // --- History modal (#13) ---
+  const btnHistory = document.getElementById('btn-history');
+  const btnCloseHistory = document.getElementById('btn-close-history');
+  const btnClearHistory = document.getElementById('btn-clear-history');
+  const historyOverlay = document.getElementById('history-overlay');
+
+  if (btnHistory) {
+    btnHistory.addEventListener('click', async () => {
+      await loadTransferHistory();
+      if (historyOverlay) historyOverlay.style.display = 'flex';
+    });
+  }
+  if (btnCloseHistory) {
+    btnCloseHistory.addEventListener('click', () => {
+      if (historyOverlay) historyOverlay.style.display = 'none';
+    });
+  }
+  if (historyOverlay) {
+    historyOverlay.addEventListener('click', (e) => {
+      if (e.target === historyOverlay) historyOverlay.style.display = 'none';
+    });
+  }
+  if (btnClearHistory) {
+    btnClearHistory.addEventListener('click', async () => {
+      await window.droidBridge.clearTransferHistory();
+      await loadTransferHistory();
+      showToast('History cleared', 'success');
+    });
+  }
+
+  // Toggle compact / detailed history view (#13)
+  const btnHistoryScale = document.getElementById('btn-history-scale');
+  let historyDetailed = false;
+  if (btnHistoryScale) {
+    btnHistoryScale.addEventListener('click', () => {
+      historyDetailed = !historyDetailed;
+      const modalCard = historyOverlay ? historyOverlay.querySelector('.history-modal') : null;
+      const listEl = document.getElementById('history-list');
+      if (historyDetailed) {
+        if (modalCard) modalCard.classList.add('detailed');
+        if (listEl) listEl.classList.add('detailed');
+        btnHistoryScale.textContent = '📏 Detailed';
+      } else {
+        if (modalCard) modalCard.classList.remove('detailed');
+        if (listEl) listEl.classList.remove('detailed');
+        btnHistoryScale.textContent = '📏 Compact';
+      }
+    });
+  }
+
+  // --- Drag-and-drop between panels (#15) ---
+  setupDragAndDrop();
+
+  // --- Virtual scroll listeners (#10) ---
+  const localListEl = document.getElementById('local-file-list');
+  const remoteListEl = document.getElementById('remote-file-list');
+  if (localListEl) localListEl.addEventListener('scroll', () => renderVisibleRows('local'));
+  if (remoteListEl) remoteListEl.addEventListener('scroll', () => renderVisibleRows('remote'));
 }
 
 function toggleComparison() {
@@ -2314,6 +2814,149 @@ async function pollDevices() {
 }
 
 /* ======================================================================
+   TRANSFER HISTORY LOADER (#13)
+   ====================================================================== */
+
+async function loadTransferHistory() {
+  const list = document.getElementById('history-list');
+  if (!list) return;
+  try {
+    const history = await window.droidBridge.getTransferHistory();
+    if (!history || history.length === 0) {
+      list.innerHTML = '<div class="history-empty">No transfers yet.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    history.forEach((entry) => {
+      const item = document.createElement('div');
+      item.className = 'history-item';
+      let dir, dirLabel, path;
+      if (entry.direction === 'wifi-upload') {
+        dir = '📶';
+        dirLabel = 'Wi-Fi Upload';
+        path = entry.fileName || '';
+      } else if (entry.direction === 'push') {
+        dir = '📤';
+        dirLabel = 'Mac → Phone';
+        path = entry.remotePath || '';
+      } else {
+        dir = '📥';
+        dirLabel = 'Phone → Mac';
+        path = entry.localPath || '';
+      }
+      const date = new Date(entry.timestamp);
+      const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' +
+        date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+      const sizeStr = entry.fileSize ? ' · ' + formatFileSize(entry.fileSize) : '';
+      const metaStr = dateStr + sizeStr + (entry.failed > 0 ? ' · ' + entry.failed + ' failed' : '');
+
+      // Extra details shown in detailed view (client IP, etc.)
+      let extraHtml = '';
+      if (entry.clientIp) {
+        extraHtml += `<div class="history-extra">IP: ${escapeHtml(entry.clientIp)}</div>`;
+      }
+      if (entry.deviceId) {
+        extraHtml += `<div class="history-extra">Device: ${escapeHtml(entry.deviceId)}</div>`;
+      }
+
+      item.innerHTML =
+        `<div class="history-top-row">` +
+        `<span class="history-dir">${dir}</span>` +
+        `<div class="history-info">` +
+        `<div class="history-path">${escapeHtml(dirLabel)} → ${escapeHtml(path)}</div>` +
+        `<div class="history-meta">${metaStr}</div>` +
+        extraHtml +
+        `</div>` +
+        `<span class="history-count">${entry.fileCount} file(s)</span>` +
+        `</div>`;
+      list.appendChild(item);
+    });
+  } catch (err) {
+    console.error('Failed to load history:', err);
+  }
+}
+
+/* ======================================================================
+   DRAG AND DROP BETWEEN PANELS (#15)
+   ====================================================================== */
+
+function setupDragAndDrop() {
+  const localList = document.getElementById('local-file-list');
+  const remoteList = document.getElementById('remote-file-list');
+
+  function makeDraggable(itemEl, side) {
+    itemEl.draggable = true;
+    itemEl.addEventListener('dragstart', (e) => {
+      const selectionSet = side === 'local' ? state.localSelected : state.remoteSelected;
+      const paths = [...selectionSet];
+      if (paths.length === 0 && itemEl.dataset.fullPath) paths.push(itemEl.dataset.fullPath);
+      e.dataTransfer.setData('text/plain', JSON.stringify({ side, paths }));
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+  }
+
+  function makeDropTarget(listEl, targetSide) {
+    listEl.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    });
+    listEl.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      try {
+        const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+        if (data.side === targetSide) return; // Can't drop on same panel
+        const paths = data.paths;
+        if (!paths || paths.length === 0) return;
+
+        if (data.side === 'local' && targetSide === 'remote') {
+          if (state.localSource === state.remoteSource) return;
+          if (state.remoteSource !== 'mac' && state.localSource === 'mac') {
+            setTransferOverlay(true);
+            const result = await window.droidBridge.pushFiles(state.remoteSource, paths, state.remotePath);
+            setTransferOverlay(false);
+            if (result && result.success) showToast(`Transferred ${result.transferred} file(s)`, 'success');
+            else if (result) showToast('Transfer failed', 'error');
+            await loadRemoteFiles(state.remotePath);
+          } else if (state.localSource !== 'mac' && state.remoteSource === 'mac') {
+            setTransferOverlay(true);
+            const result = await window.droidBridge.pullFiles(state.localSource, paths, state.localPath);
+            setTransferOverlay(false);
+            if (result && result.success) showToast(`Transferred ${result.transferred} file(s)`, 'success');
+            else if (result) showToast('Transfer failed', 'error');
+            await loadLocalFiles(state.localPath);
+          }
+        } else if (data.side === 'remote' && targetSide === 'local') {
+          if (state.localSource === state.remoteSource) return;
+          if (state.remoteSource !== 'mac' && state.localSource === 'mac') {
+            setTransferOverlay(true);
+            const result = await window.droidBridge.pullFiles(state.remoteSource, paths, state.localPath);
+            setTransferOverlay(false);
+            if (result && result.success) showToast(`Transferred ${result.transferred} file(s)`, 'success');
+            else if (result) showToast('Transfer failed', 'error');
+            await loadLocalFiles(state.localPath);
+          } else if (state.remoteSource === 'mac' && state.localSource !== 'mac') {
+            setTransferOverlay(true);
+            const result = await window.droidBridge.pushFiles(state.localSource, paths, state.localPath);
+            setTransferOverlay(false);
+            if (result && result.success) showToast(`Transferred ${result.transferred} file(s)`, 'success');
+            else if (result) showToast('Transfer failed', 'error');
+            await loadLocalFiles(state.localPath);
+          }
+        }
+      } catch (err) {
+        console.error('Drag-drop error:', err);
+      }
+    });
+  }
+
+  if (localList) makeDropTarget(localList, 'local');
+  if (remoteList) makeDropTarget(remoteList, 'remote');
+
+  // Expose makeDraggable for renderFileList to call on each item
+  window.__makeDraggable = makeDraggable;
+}
+
+/* ======================================================================
    INITIALIZATION
    ====================================================================== */
 
@@ -2326,9 +2969,12 @@ async function init() {
     // Do not block application load if ADB is missing, allowing Wi-Fi Share Mode usage.
     hideScreen('no-adb-screen');
 
-    // 2. Get home directory and set as initial local path
+    // 2. Get home directory; load remembered last paths from settings (#17)
     const homeDir = await window.droidBridge.getHomeDir();
-    state.localPath = homeDir || '/';
+    let settings = {};
+    try { settings = await window.droidBridge.getSettings(); } catch (e) {}
+    state.localPath = settings.lastLocalPath || homeDir || '/';
+    state.remotePath = settings.lastRemotePath || '/sdcard';
 
     // Auto-sync version display in About modal
     if (window.droidBridge.getAppVersion) {
@@ -2340,8 +2986,15 @@ async function init() {
       }).catch(() => {});
     }
 
-    // 3. Load local files
+    // 3. Load local files (left panel)
     await loadLocalFiles(state.localPath);
+
+    // 3b. Load right panel files (defaults to mac, same as left)
+    // If remotePath is /sdcard (Android default) but source is mac, redirect to home dir.
+    if (state.remoteSource === 'mac' && (state.remotePath === '/sdcard' || !state.remotePath)) {
+      state.remotePath = homeDir || '/';
+    }
+    await loadRemoteFiles(state.remotePath);
 
     // 4. Initially show "no device" screen
     showScreen('no-device-screen');
@@ -2369,8 +3022,9 @@ async function init() {
     // 7. Initial device check (in case a device is already connected)
     await refreshDevicesList();
 
-    // 8. Periodic device poll every 5 seconds as a safety net
-    setInterval(refreshDevicesList, 5000);
+    // No renderer-side polling: the main process polls `adb devices` every 3s
+    // and pushes device-connected / device-disconnected events, which we
+    // already listen to above. This avoids redundant IPC traffic.
 
   } catch (err) {
     console.error('Initialization error:', err);

@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('droidBridge', {
   getDevices: () => ipcRenderer.invoke('get-devices'),
   getDeviceInfo: (deviceId) => ipcRenderer.invoke('get-device-info', deviceId),
   getStorageInfo: (deviceId) => ipcRenderer.invoke('get-storage-info', deviceId),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  copyToClipboard: (text) => ipcRenderer.invoke('copy-to-clipboard', text),
 
   // Local filesystem
   listLocalFiles: (dirPath) => ipcRenderer.invoke('list-local-files', dirPath),
@@ -20,11 +22,24 @@ contextBridge.exposeInMainWorld('droidBridge', {
   // Remote (Android) filesystem
   listRemoteFiles: (deviceId, dirPath) => ipcRenderer.invoke('list-remote-files', { deviceId, dirPath }),
   deleteRemote: (deviceId, remotePath) => ipcRenderer.invoke('delete-remote', { deviceId, remotePath }),
+  deleteLocal: (filePath) => ipcRenderer.invoke('delete-local', filePath),
   createRemoteDir: (deviceId, remotePath) => ipcRenderer.invoke('create-remote-dir', { deviceId, remotePath }),
+  renameLocal: (oldPath, newName) => ipcRenderer.invoke('rename-local', { oldPath, newName }),
+  renameRemote: (deviceId, remotePath, newName) => ipcRenderer.invoke('rename-remote', { deviceId, remotePath, newName }),
 
   // File transfer
   pushFiles: (deviceId, localPaths, remotePath) => ipcRenderer.invoke('push-files', { deviceId, localPaths, remotePath }),
   pullFiles: (deviceId, remotePaths, localPath) => ipcRenderer.invoke('pull-files', { deviceId, remotePaths, localPath }),
+  cancelTransfer: () => ipcRenderer.invoke('cancel-transfer'),
+  pauseTransfer: () => ipcRenderer.invoke('pause-transfer'),
+  resumeTransfer: () => ipcRenderer.invoke('resume-transfer'),
+
+  // Settings & History
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  setSettings: (partial) => ipcRenderer.invoke('set-settings', partial),
+  getTransferHistory: () => ipcRenderer.invoke('get-transfer-history'),
+  clearTransferHistory: () => ipcRenderer.invoke('clear-transfer-history'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
 
   // Events from main process
   onDeviceConnected: (callback) => {
@@ -51,4 +66,9 @@ contextBridge.exposeInMainWorld('droidBridge', {
   onWifiUploadProgress: (callback) => {
     ipcRenderer.on('wifi-upload-progress', (_event, data) => callback(data));
   },
+
+  // Local & Remote File Thumbnail / Preview IPC
+  getLocalThumbnail: (filePath) => ipcRenderer.invoke('get-local-thumbnail', filePath),
+  getRemoteThumbnail: (deviceId, remotePath) => ipcRenderer.invoke('get-remote-thumbnail', { deviceId, remotePath }),
+  fetchRemotePreview: (deviceId, remotePath) => ipcRenderer.invoke('fetch-remote-preview', { deviceId, remotePath }),
 });

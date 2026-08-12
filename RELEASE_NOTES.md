@@ -1,3 +1,40 @@
+# Release Notes - DroidBridge v2.0.0 (Major Overhaul Release)
+
+We are thrilled to present **DroidBridge v2.0.0**, a monumental release representing a complete architectural modularization and feature expansion. This version splits the core logic into clean, testable sub-modules, introduces complete transfer controls (pause/resume/cancel), adds transaction history log persistence, configures settings management, and includes a full suite of automated unit tests.
+
+---
+
+## 🌟 Key New Features & Capabilities
+
+### ⏸️ Real-Time Transfer Controls (Pause, Resume, Cancel)
+* **OS-Level Signal Freezing**: Dynamic **Pause (SIGSTOP)** and **Resume (SIGCONT)** capabilities let you temporarily suspend high-volume ADB operations at the kernel level without breaking socket sessions.
+* **Instant Cancellation**: Cancel in-progress transfers with clean child process cleanup and partial file sweep deletion.
+* **ETA & Speed Statistics**: The new progress status bar displays live EMA-smoothed transfer speeds and precise time-to-completion (ETA) estimates.
+
+### 📋 Settings & Operation History Logs
+* **Settings Modal (⚙️)**: Configure your local port choices and GitHub update checking path directly from a sleek title bar interface.
+* **Transfer History Log (📋)**: A new local database stores a history of completed and aborted transfers. Offers a Compact/Detailed view toggle to see full transaction data, remote IPs, and timestamps.
+* **Check for Updates**: A dynamic checker compares your local version against the latest tags in the GitHub repository.
+
+### 📁 UI Utilities & Enhancements
+* **Directory Virtualization**: Enhances UI performance in huge directories (1000+ files) by dynamically rendering only visible rows, maintaining a constant 60fps refresh.
+* **Custom Input Modals**: Replaced Electron's disabled `window.prompt()` fallback with custom, keyboard-navigable dialog modal forms for file renaming and folder creations.
+* **ZIP Folder Streaming**: Download entire directory structures directly from the mobile browser client as a compressed archive on-the-fly.
+
+---
+
+## 🏗️ Architecture & Refactoring
+
+* **Module Split**: Split the massive `main.js` controller into separate sub-modules:
+  * `src/adb.js`: Abstracted adb processes, stat lookups, and filename parsing.
+  * `src/security.js`: Local path allowlisting containment checks and auth validation.
+  * `src/settings.js`: JSON configuration storage logic.
+* **Clean Web UI Extraction**: Mobile UI pages (`mobile.html` and `login.html`) are now standalone HTML files parsed with nonce and security parameters.
+* **Automated Unit Tests**: Integrated a full suite of 27 unit tests (`test/utils.test.js`) executing natively via Node's test runner (`node --test`).
+* **Formatters & Linters**: Implemented **ESLint** and **Prettier** configs and commands to enforce codebase style guide consistency.
+
+---
+
 # Release Notes - DroidBridge v1.1.1 (Security Hardening Release)
 
 We are excited to release **DroidBridge v1.1.1**, a critical security patch release addressing findings identified in our security audit. This version hardens the Wi-Fi sharing server and local file processing pipelines.

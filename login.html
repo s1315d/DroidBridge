@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DroidBridge Wi-Fi Share Login</title>
+  <style nonce="__NONCE__">
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: #08080c;
+      color: #e2e2e9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .login-container {
+      background-color: #111119;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      padding: 32px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      text-align: center;
+    }
+    h2 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+    p {
+      font-size: 13px;
+      color: #8888a0;
+      margin-bottom: 24px;
+      line-height: 1.5;
+    }
+    .input-group {
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #5f5f7a;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+    input[type="text"] {
+      width: 100%;
+      background-color: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    input[type="text"]:focus {
+      border-color: #6c5ce7;
+      box-shadow: 0 0 0 2px rgba(108, 92, 231, 0.2);
+    }
+    button {
+      width: 100%;
+      background-color: #6c5ce7;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.2s, transform 0.1s;
+    }
+    button:hover {
+      background-color: #5b4cc4;
+    }
+    button:active {
+      transform: scale(0.98);
+    }
+    .error-msg {
+      color: #ff6b6b;
+      font-size: 13px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <h2>DroidBridge Wi-Fi Share</h2>
+    <p>Please enter the Wi-Fi Share Access Token shown on the Mac application screen to connect.</p>
+    <form method="POST" action="/login">
+      <div class="input-group">
+        <label for="token-input">Access Token</label>
+        <input type="text" id="token-input" name="token" placeholder="Enter Token" required autocomplete="off" />
+      </div>
+      <button type="submit">Access Files</button>
+    </form>
+    __ERROR_MSG__
+  </div>
+</body>
+</html>

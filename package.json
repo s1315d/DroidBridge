@@ -1,11 +1,14 @@
 {
   "name": "droidbridge",
-  "version": "1.1.1",
+  "version": "2.0.0",
   "description": "Premium Mac ↔ Android file transfer app",
   "main": "main.js",
   "scripts": {
     "start": "node -e \"if (!require('fs').existsSync('node_modules')) { console.log('node_modules not found, auto-installing dependencies...'); require('child_process').execSync('npm install', {stdio: 'inherit'}); }\" && npx electron .",
     "dev": "electron . --dev",
+    "test": "node --test test/*.test.js",
+    "lint": "eslint main.js renderer.js preload.js src/ test/ --ignore-path .gitignore || true",
+    "format": "prettier --write \"*.js\" \"src/*.js\" \"test/*.js\" --ignore-path .prettierignore",
     "package": "node -e \"if (!require('fs').existsSync('node_modules/electron-packager')) { console.log('electron-packager not found, installing dependencies...'); require('child_process').execSync('npm install', {stdio: 'inherit'}); }\" && node build-mac-icon.js && electron-packager . DroidBridge --platform=darwin --overwrite --icon=icon.icns"
   },
   "keywords": [
@@ -18,9 +21,12 @@
   "license": "MIT",
   "devDependencies": {
     "electron": "^35.0.0",
-    "electron-packager": "^17.1.2"
+    "electron-packager": "^17.1.2",
+    "eslint": "^9.39.5",
+    "prettier": "^3.9.6"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "qrcode": "^1.5.4"
   }
 }

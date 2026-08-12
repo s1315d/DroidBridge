@@ -1,0 +1,45 @@
+{
+  "env": {
+    "node": true,
+    "browser": true,
+    "es2022": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "commonjs"
+  },
+  "extends": "eslint:recommended",
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+    "no-undef": "error",
+    "no-redeclare": "error",
+    "no-extra-semi": "error",
+    "no-unreachable": "warn",
+    "prefer-const": "warn",
+    "eqeqeq": ["warn", "smart"],
+    "no-var": "warn"
+  },
+  "globals": {
+    "require": "readonly",
+    "module": "readonly",
+    "exports": "readonly",
+    "process": "readonly",
+    "__dirname": "readonly",
+    "console": "readonly",
+    "setTimeout": "readonly",
+    "setInterval": "readonly",
+    "clearInterval": "readonly",
+    "document": "readonly",
+    "window": "readonly",
+    "navigator": "readonly",
+    "requestAnimationFrame": "readonly",
+    "fetch": "readonly",
+    "XMLHttpRequest": "readonly",
+    "alert": "readonly",
+    "prompt": "readonly",
+    "URL": "readonly",
+    "URLSearchParams": "readonly",
+    "FormData": "readonly"
+  },
+  "ignore": ["node_modules/", "DroidBridge-darwin-arm64/"]
+}

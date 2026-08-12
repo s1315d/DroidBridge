@@ -1,0 +1,9 @@
+node_modules/
+DroidBridge-darwin-arm64/
+*.app/
+*.zip
+*.log
+.DS_Store
+Thumbs.db
+dist/
+out/
